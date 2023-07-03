@@ -1,5 +1,5 @@
 const std = @import("std");
-const windows = @import("windows");
+const windows = @import("windows.zig");
 
 const serde = @import("serde.zig");
 const SharedMem = @import("SharedMem.zig");

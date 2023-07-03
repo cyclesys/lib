@@ -6,10 +6,6 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const windows = b.createModule(.{
-        .source_file = .{ .path = "windows.zig" },
-    });
-
     const vulkan_sdk_path = b.env_map.get("VULKAN_SDK");
     if (vulkan_sdk_path == null) {
         return error.VulkanSdkNotSet;
@@ -30,7 +26,6 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
-    lib_tests.addModule("windows", windows);
     lib_tests.addModule("vulkan", vulkan);
     lib_tests.addModule("freetype", freetype);
     lib_tests.addModule("harfbuzz", harfbuzz);

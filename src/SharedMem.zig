@@ -1,4 +1,4 @@
-const windows = @import("windows");
+const windows = @import("windows.zig");
 
 const Self = @This();
 
