@@ -1,0 +1,9 @@
+[submodule "libs/known-folders"]
+	path = libs/known-folders
+	url = https://github.com/ziglibs/known-folders
+[submodule "libs/mach-freetype"]
+	path = libs/mach-freetype
+	url = https://github.com/hexops/mach-freetype
+[submodule "libs/vulkan-zig"]
+	path = libs/vulkan-zig
+	url = https://github.com/snektron/vulkan-zig
