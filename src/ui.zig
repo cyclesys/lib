@@ -20,3 +20,7 @@ pub const IterableLayoutChildren = tree.IterableLayoutChildren;
 pub const LayoutChild = tree.LayoutChild;
 pub const initNode = tree.initNode;
 pub const render = tree.render;
+
+test {
+    _ = @import("ui/text/GraphemeIterator.zig");
+}

@@ -355,7 +355,6 @@ const BreakTable = struct {
 
     fn addProperties(self: *BreakTable, props: *Properties) !void {
         var iter = props.iterator();
-        var index: usize = 0;
         while (iter.next()) |entry| {
             const property = entry.key_ptr.*;
             try self.props.append(property);
@@ -363,12 +362,10 @@ const BreakTable = struct {
             const ranges = entry.value_ptr.*;
             for (ranges.items) |range| {
                 try self.items.append(.{
-                    .property = index,
+                    .property = self.props.items.len - 1,
                     .range = range,
                 });
             }
-
-            index += 1;
         }
     }
 

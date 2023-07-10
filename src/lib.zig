@@ -23,4 +23,5 @@ test {
     _ = @import("definition.zig");
     _ = @import("object.zig");
     _ = @import("serde.zig");
+    _ = @import("ui.zig");
 }
