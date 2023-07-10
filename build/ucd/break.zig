@@ -1,55 +1,8 @@
 const std = @import("std");
-const util = @import("util.zig");
+const util = @import("../util.zig");
+const ucd = @import("../ucd.zig");
 
-// support reading up to 10mb files.
-const max_file_size = 10_000_000;
-
-// the unicode version the code gen is based on.
-const version = [3]u8{ 15, 0, 0 };
-
-inline fn versionStr(comptime delimiter: u8) []const u8 {
-    comptime {
-        var result: []const u8 = "";
-        for (version, 0..) |part, i| {
-            if (i > 0) {
-                result = result ++ .{delimiter};
-            }
-            const part_str_size = std.fmt.count("{d}", .{part});
-            var part_str: [part_str_size]u8 = undefined;
-            _ = std.fmt.formatIntBuf(&part_str, part, 10, .lower, .{});
-            result = result ++ part_str;
-        }
-        return result;
-    }
-}
-
-inline fn ucdFile(comptime name: []const u8) []const u8 {
-    comptime {
-        return versionStr('_') ++ "-" ++ name;
-    }
-}
-
-inline fn ucdUrl(comptime name: []const u8) []const u8 {
-    comptime {
-        return "https://www.unicode.org/Public/" ++ versionStr('.') ++ "/ucd/" ++ name;
-    }
-}
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    // this assumes that we're being run through `zig build unicode`.
-    const lib_root = try std.fs.cwd().realpathAlloc(allocator, ".");
-    defer allocator.free(lib_root);
-
-    const cache_root = try std.fs.path.join(allocator, &.{ lib_root, "zig-cache" });
-    defer allocator.free(cache_root);
-
-    const code_file_path = try std.fs.path.join(allocator, &.{ lib_root, "src", "ui", "text", "unicode.zig" });
-    defer allocator.free(code_file_path);
-
+pub fn gen(allocator: std.mem.Allocator, code_root: []const u8, cache_root: []const u8) !void {
     var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
@@ -125,7 +78,12 @@ pub fn main() !void {
 
     try BreakTable.writeLookupInterval(&out);
 
+    const code_file_path = try std.fs.path.join(allocator, &.{ code_root, "break.zig" });
+    defer allocator.free(code_file_path);
+
     const code_file = try std.fs.createFileAbsolute(code_file_path, .{ .truncate = true });
+    defer code_file.close();
+
     try code_file.writeAll(out.items);
 }
 
@@ -228,19 +186,18 @@ fn initProperties(
     filters: []const []const u8,
     comptime lineInfo: LineInfoFn,
 ) !Properties {
-    const file_name = comptime blk: {
-        var result: [ucd_name.len]u8 = undefined;
-        @memcpy(&result, ucd_name);
-        std.mem.replaceScalar(u8, &result, '/', '_');
-        break :blk result;
-    };
-    const file_path = try util.ensureCachedFile(allocator, cache_root, ucdFile(&file_name), ucdUrl(ucd_name));
+    const file_path = try util.ensureCachedFile(
+        allocator,
+        cache_root,
+        comptime ucd.ucdFile(ucd_name),
+        comptime ucd.ucdUrl(ucd_name),
+    );
     defer allocator.free(file_path);
 
     const file = try std.fs.openFileAbsolute(file_path, .{});
     defer file.close();
 
-    const bytes = try file.readToEndAlloc(allocator, max_file_size);
+    const bytes = try file.readToEndAlloc(allocator, 10_000_000);
     defer allocator.free(bytes);
 
     var props = Properties.init(allocator);
@@ -372,7 +329,7 @@ const BreakTable = struct {
     const lookup_table_len: u32 = 0x400;
     const lookup_interval = @as(u32, @divFloor(lookup_value_cutoff, lookup_table_len));
 
-    pub fn writeLookupInterval(buf: *std.ArrayList(u8)) !void {
+    fn writeLookupInterval(buf: *std.ArrayList(u8)) !void {
         try std.fmt.format(buf.writer(), "pub const break_lookup_interval = 0x{x};", .{lookup_interval});
     }
 
@@ -482,8 +439,8 @@ fn writeLowerCase(prop: []const u8, buf: *std.ArrayList(u8)) !void {
     try buf.appendSlice(prop[1..]);
 }
 
-fn writeUnicodeCodePoint(buf: *std.ArrayList(u8), code_point: u32) !void {
-    try buf.appendSlice("'\\u{");
-    try std.fmt.format(buf.writer(), "{x}", .{code_point});
-    try buf.appendSlice("}'");
+fn writeUnicodeCodePoint(out: *std.ArrayList(u8), code_point: u32) !void {
+    try out.appendSlice("'\\u{");
+    try std.fmt.format(out.writer(), "{x}", .{code_point});
+    try out.appendSlice("}'");
 }
