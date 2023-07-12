@@ -60,6 +60,7 @@ pub fn gen(allocator: std.mem.Allocator, code_root: []const u8, cache_root: []co
         defer deinitProperties(allocator, &word_break_props);
 
         try word_break_table.addProperties(&word_break_props);
+        try word_break_table.addProperties(&emoji_props);
         word_break_table.sort();
         try word_break_table.write(&out);
     }

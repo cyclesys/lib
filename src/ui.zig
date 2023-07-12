@@ -22,5 +22,5 @@ pub const initNode = tree.initNode;
 pub const render = tree.render;
 
 test {
-    _ = @import("ui/text/GraphemeIterator.zig");
+    _ = @import("ui/text/break.zig");
 }
