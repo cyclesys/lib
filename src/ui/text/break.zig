@@ -485,6 +485,205 @@ pub const WordIterator = struct {
     }
 };
 
+pub const SentenceIterator = struct {
+    str: []const u8,
+    offset: usize,
+    cached_table_item: ?ucd.SentenceBreakTableItem,
+
+    const SentenceState = struct {
+        iter: *SentenceIterator,
+        start: usize,
+        peek_offset: usize,
+        rule: ?Rule,
+
+        const Rule = enum {
+            CRLF,
+            Ignore,
+            ATerm,
+            ATermClose,
+            ATermSp,
+            STerm,
+            STermClose,
+            STermSp,
+            UpperLower,
+            UpperLowerATerm,
+            Any,
+        };
+
+        fn init(iter: *SentenceIterator) SentenceState {
+            return SentenceState{
+                .iter = iter,
+                .start = iter.offset,
+                .peek_offset = 0,
+                .rule = null,
+            };
+        }
+
+        fn next(self: *SentenceState, code_point: []const u8, prop: ucd.SentenceBreakProperty) ?[]const u8 {
+            if (self.rule == null) {
+                return self.nextAny(code_point, prop);
+            }
+
+            return switch (self.rule.?) {
+                .CRLF => switch (prop) {
+                    .LF => self.finalizeAdvance(code_point),
+                    else => self.finalize(),
+                },
+                .Ignore => switch (prop) {
+                    .Extend, .Format => self.advance(code_point, null),
+                    else => self.finalize(),
+                },
+                .ATerm => self.nextATerm(code_point, prop),
+                .ATermClose, .ATermSp => switch (prop) {
+                    .Lower => self.peek(code_point, .Any),
+                    else => self.nextATerm(code_point, prop),
+                },
+                .STerm, .STermClose, .STermSp => switch (prop) {
+                    .Extend, .Format => self.advance(code_point, null),
+                    .ATerm => self.advance(code_point, .ATerm),
+                    .STerm => self.advance(code_point, null),
+                    .Close => switch (self.rule.?) {
+                        .STermSp => self.finalize(),
+                        else => self.advance(code_point, .STermClose),
+                    },
+                    .Sp => self.advance(code_point, .STermSp),
+                    .SContinue => self.advance(code_point, .Any),
+                    .CR => self.advance(code_point, .CRLF),
+                    .Sep, .LF => self.finalizeAdvance(code_point),
+                    else => self.finalize(),
+                },
+                .UpperLower => switch (prop) {
+                    .ATerm => self.peek(code_point, .UpperLowerATerm),
+                    else => self.nextAny(code_point, prop),
+                },
+                .UpperLowerATerm => switch (prop) {
+                    .Upper => self.advance(code_point, .UpperLower),
+                    .Extend, .Format => self.advance(code_point, null),
+                    else => self.nextATerm(code_point, prop),
+                },
+                .Any => self.nextAny(code_point, prop),
+            };
+        }
+
+        fn end(self: *SentenceState) ?[]const u8 {
+            return switch (self.rule.?) {
+                .UpperLowerATerm => self.finalizePeek(),
+                else => self.finalize(),
+            };
+        }
+
+        inline fn nextAny(self: *SentenceState, code_point: []const u8, prop: ucd.SentenceBreakProperty) ?[]const u8 {
+            return switch (prop) {
+                .CR => self.advance(code_point, .CRLF),
+                .Sep, .LF => self.finalizeAdvance(code_point),
+                .Extend, .Format => self.advance(code_point, .Any),
+                .ATerm => self.advance(code_point, .ATerm),
+                .STerm => self.advance(code_point, .STerm),
+                .Upper, .Lower => self.advance(code_point, .UpperLower),
+                else => self.advance(code_point, .Any),
+            };
+        }
+
+        inline fn nextATerm(self: *SentenceState, code_point: []const u8, prop: ucd.SentenceBreakProperty) ?[]const u8 {
+            return switch (prop) {
+                .Extend, .Format => self.advance(code_point, null),
+                .Numeric => self.advance(code_point, .Any),
+                .ATerm => self.advance(code_point, null),
+                .STerm => self.advance(code_point, .STerm),
+                .Close => switch (self.rule.?) {
+                    .ATermSp => self.finalize(),
+                    else => self.advance(code_point, .ATermClose),
+                },
+                .Sp => self.advance(code_point, .ATermSp),
+                .SContinue => self.advance(code_point, .Any),
+                .Lower => self.advance(code_point, .Any),
+                .CR => self.advance(code_point, .CRLF),
+                .Sep, .LF => self.finalizeAdvance(code_point),
+                else => self.finalize(),
+            };
+        }
+
+        inline fn advance(self: *SentenceState, code_point: []const u8, comptime rule: ?Rule) ?[]const u8 {
+            if (rule) |r| {
+                self.rule = r;
+            }
+            self.iter.offset += code_point.len + self.peek_offset;
+            self.peek_offset = 0;
+            return null;
+        }
+
+        inline fn peek(self: *SentenceState, code_point: []const u8, comptime rule: ?Rule) ?[]const u8 {
+            if (rule) |r| {
+                self.rule = r;
+            }
+            self.peek_offset += code_point.len;
+            return null;
+        }
+
+        inline fn finalizeAdvance(self: *SentenceState, code_point: []const u8) []const u8 {
+            self.iter.offset += code_point.len;
+            return self.finalizePeek();
+        }
+
+        inline fn finalizePeek(self: *SentenceState) []const u8 {
+            self.iter.offset += self.peek_offset;
+            return self.finalize();
+        }
+
+        inline fn finalize(self: *SentenceState) []const u8 {
+            return self.iter.str[self.start..self.iter.offset];
+        }
+    };
+
+    pub fn init(str: []const u8) SentenceIterator {
+        return SentenceIterator{
+            .str = str,
+            .offset = 0,
+            .cached_table_item = null,
+        };
+    }
+
+    pub fn next(self: *SentenceIterator) !?[]const u8 {
+        if (self.offset == self.str.len) {
+            return null;
+        }
+
+        var state = SentenceState.init(self);
+        var iter = std.unicode.Utf8Iterator{ .bytes = self.str[state.start..], .i = 0 };
+        while (true) {
+            const code_point = if (iter.nextCodepointSlice()) |slice| slice else {
+                if (self.offset + state.peek_offset != self.str.len) {
+                    return error.InvalidUtf8;
+                }
+                return state.end();
+            };
+            const prop = try self.sentenceProperty(code_point);
+            return state.next(code_point, prop) orelse continue;
+        }
+    }
+
+    inline fn sentenceProperty(self: *SentenceIterator, code_point: []const u8) !ucd.SentenceBreakProperty {
+        const unit: u32 = @intCast(try std.unicode.utf8Decode(code_point));
+
+        if (self.cached_table_item) |cached_item| {
+            if (cached_item[0] <= unit and unit <= cached_item[1]) {
+                return cached_item[2];
+            }
+        }
+
+        const item = matchTableItem(
+            ucd.SentenceBreakTableItem,
+            unit,
+            &ucd.sentence_break_lookup,
+            &ucd.sentence_break_table,
+            2410,
+            2421,
+        );
+        self.cached_table_item = item;
+        return item[2];
+    }
+};
+
 fn matchTableItem(
     comptime Item: type,
     unit: u32,
@@ -592,6 +791,10 @@ test "word break iterator" {
     try testBreakIterator(&ucd_test.word_test_cases, WordIterator.init);
 }
 
+test "sentence break iterator" {
+    try testBreakIterator(&ucd_test.sentence_test_cases, SentenceIterator.init);
+}
+
 fn testBreakIterator(cases: anytype, initFn: anytype) !void {
     for (cases, 0..) |case, i| {
         var iter = initFn(case[0]);
@@ -608,6 +811,7 @@ fn testBreakIterator(cases: anytype, initFn: anytype) !void {
             }
             std.testing.expectEqual(expected[idx], actual) catch |e| {
                 std.log.warn("FAILED TEST CASE: {} -- {}\n", .{ i, idx });
+                std.log.warn("EXPECTED: {x}, ACTUAL: {x}\n", .{ expected[idx], actual });
                 return e;
             };
         }
