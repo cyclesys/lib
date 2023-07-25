@@ -90,7 +90,7 @@ const Gen = struct {
 
         try buf.appendSlice("pub const index = [_]u16 {");
         for (trie.index) |val| {
-            try formatter.next("0x{x}", val);
+            try formatter.next("0x{X}", val);
         }
         try buf.appendSlice("\n};\n");
 
@@ -107,7 +107,7 @@ const Gen = struct {
         }
         try buf.appendSlice("\n};\n");
 
-        try std.fmt.format(buf.writer(), "pub const high_start = 0x{x};", .{trie.high_start});
+        try std.fmt.format(buf.writer(), "pub const high_start = 0x{X};", .{trie.high_start});
 
         try self.genCodeFile(ucd_path, buf.items);
     }
