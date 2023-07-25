@@ -3,30 +3,32 @@ const std = @import("std");
 allocator: std.mem.Allocator,
 
 index: []u32,
-index3_null_offset: ?usize,
+index3_null_offset: ?u32,
 
 data: []u32,
-data_len: usize,
-data_null_offset: ?usize,
+data_len: u32,
+data_null_offset: ?u32,
 
 original_initial_value: u32,
 initial_value: u32,
 error_value: u32,
 
-high_start: usize,
+high_start: u32,
 high_value: u32,
 
 index16: []u16,
 flags: [FLAGS_LEN]u2,
 
 pub const Trie = struct {
+    allocator: std.mem.Allocator,
     index: []const u16,
     data: []const u8,
     high_start: u32,
-    shifted12_high_start: u16,
-    index3_null_offset: u16,
-    data_null_offset: u32,
-    null_value: u32,
+
+    pub fn deinit(self: Trie) void {
+        self.allocator.free(self.index);
+        self.allocator.free(self.data);
+    }
 };
 
 const Self = @This();
@@ -49,7 +51,7 @@ pub fn init(allocator: std.mem.Allocator, initial_value: u32, error_value: u32) 
         .initial_value = initial_value,
         .error_value = error_value,
         .high_start = 0,
-        .high_vaue = initial_value,
+        .high_value = initial_value,
         .index16 = undefined,
         .flags = [_]u2{0} ** FLAGS_LEN,
     };
@@ -58,9 +60,10 @@ pub fn init(allocator: std.mem.Allocator, initial_value: u32, error_value: u32) 
 pub fn deinit(self: *Self) void {
     self.allocator.free(self.index);
     self.allocator.free(self.data);
+    self.allocator.free(self.index16);
 }
 
-fn ensureCapacity(self: *Self, slice: []const u32, capacity: usize) ![]u32 {
+fn ensureCapacity(self: *Self, slice: []u32, capacity: usize) ![]u32 {
     if (slice.len < capacity) {
         const new_slice = try self.allocator.alloc(u32, capacity);
         @memcpy(new_slice[0..slice.len], slice);
@@ -78,8 +81,9 @@ pub fn setRange(self: *Self, start: u32, end: u32, value: u32) !void {
     try self.ensureHighStart(end);
 
     var limit = end + 1;
-    if (start & SMALL_DATA_MASK) {
-        const block_start = try self.getDataBlock(start >> SHIFT_3);
+    var range_start = start;
+    if (start & SMALL_DATA_MASK > 1) {
+        var block_start = try self.getDataBlock(start >> SHIFT_3);
         const next_start = (start + SMALL_DATA_MASK) & ~SMALL_DATA_MASK;
         if (next_start > limit) {
             const block_end = block_start + (limit & SMALL_DATA_MASK);
@@ -91,13 +95,13 @@ pub fn setRange(self: *Self, start: u32, end: u32, value: u32) !void {
         const block_end = block_start + SMALL_DATA_BLOCK_LENGTH;
         block_start += (start & SMALL_DATA_MASK);
         @memset(self.data[block_start..block_end], value);
-        start = next_start;
+        range_start = next_start;
     }
 
     const rest = limit & SMALL_DATA_MASK;
     limit &= ~SMALL_DATA_MASK;
 
-    while (start < limit) {
+    while (range_start < limit) {
         const i = start >> SHIFT_3;
         if (self.flags[i] == ALL_SAME) {
             self.index[i] = value;
@@ -106,11 +110,11 @@ pub fn setRange(self: *Self, start: u32, end: u32, value: u32) !void {
             const block_end = block_start + SMALL_DATA_BLOCK_LENGTH;
             @memset(self.data[block_start..block_end], value);
         }
-        start += SMALL_DATA_BLOCK_LENGTH;
+        range_start += SMALL_DATA_BLOCK_LENGTH;
     }
 
     if (rest > 0) {
-        const block_start = try self.getDataBlock(start >> SHIFT_3);
+        const block_start = try self.getDataBlock(range_start >> SHIFT_3);
         const block_end = block_start + rest;
         @memset(self.data[block_start..block_end], value);
     }
@@ -147,7 +151,7 @@ fn getDataBlock(self: *Self, i: usize) !usize {
         var i_start = i & ~(SMALL_DATA_BLOCKS_PER_BMP_BLOCK - 1);
         const i_limit = i_start + SMALL_DATA_BLOCKS_PER_BMP_BLOCK;
         while (true) {
-            @memset(self.data[block_start..SMALL_DATA_BLOCK_LENGTH], self.index[i_start]);
+            @memset(self.data[block_start..][0..SMALL_DATA_BLOCK_LENGTH], self.index[i_start]);
             self.flags[i_start] = MIXED;
             self.index[i_start] = block_start;
             block_start += SMALL_DATA_BLOCK_LENGTH;
@@ -160,13 +164,13 @@ fn getDataBlock(self: *Self, i: usize) !usize {
     }
 
     var block_start = try self.allocDataBlock(SMALL_DATA_BLOCK_LENGTH);
-    @memset(self.data[block_start..SMALL_DATA_BLOCK_LENGTH], self.index[i]);
+    @memset(self.data[block_start..][0..SMALL_DATA_BLOCK_LENGTH], self.index[i]);
     self.flags[i] = MIXED;
     self.index[i] = block_start;
     return block_start;
 }
 
-fn allocDataBlock(self: *Self, block_len: usize) !usize {
+fn allocDataBlock(self: *Self, block_len: u32) !u32 {
     const block_start = self.data_len;
     const block_end = block_start + block_len;
     if (block_end > self.data.len) {
@@ -207,30 +211,28 @@ pub fn build(self: *Self) !Trie {
         self.data_len += 1;
     }
 
-    var trie = Trie{
-        .index = try self.allocator.alloc(u16, index_len),
-        .data = try self.allocator.alloc(u8, self.data_len),
-        .high_start = self.high_start,
-        .shifted12_high_start = (self.high_start + 0xFFF) >> 12,
-        .index3_null_offset = self.index3_null_offset.?,
-        .data_null_offset = self.data_null_offset.?,
-        .null_value = self.initial_value,
-    };
+    var index = try self.allocator.alloc(u16, index_len);
+    var data = try self.allocator.alloc(u8, self.data_len);
     if (self.high_start <= BMP_LIMIT) {
         var i: usize = 0;
         for (0..index_len) |j| {
-            trie.index[j] = @intCast(self.index[i]);
+            index[j] = @intCast(self.index[i]);
             i += SMALL_DATA_BLOCKS_PER_BMP_BLOCK;
         }
     } else {
-        @memcpy(self.index, self.index16[0..index_len]);
+        @memcpy(index, self.index16[0..index_len]);
     }
 
     for (0..self.data_len) |i| {
-        trie.data[i] = @intCast(self.data[i]);
+        data[i] = @intCast(self.data[i]);
     }
 
-    return trie;
+    return Trie{
+        .allocator = self.allocator,
+        .index = index,
+        .data = data,
+        .high_start = self.high_start,
+    };
 }
 
 fn maskValues(self: *Self, mask: u32) void {
@@ -271,7 +273,7 @@ fn compactTrie(self: *Self) !usize {
 
     var ascii_data: [ASCII_LIMIT]u32 = undefined;
     for (0..ASCII_LIMIT) |i| {
-        ascii_data[i] = self.get(i);
+        ascii_data[i] = self.get(@intCast(i));
     }
 
     var all_same_blocks = AllSameBlocks{};
@@ -283,7 +285,9 @@ fn compactTrie(self: *Self) !usize {
 
     const data_null_index = all_same_blocks.findMostUsed();
 
-    var mixed_blocks = MixedBlocks{};
+    var mixed_blocks = MixedBlocks.init(self.allocator);
+    defer mixed_blocks.deinit();
+
     const new_data_len = try self.compactData(new_data, data_null_index, &mixed_blocks);
     self.data_len = new_data_len;
 
@@ -301,7 +305,7 @@ fn compactTrie(self: *Self) !usize {
         self.data_null_offset = NO_DATA_NULL_OFFSET;
     }
 
-    const index_len = try compactIndex(&mixed_blocks);
+    const index_len = try self.compactIndex(&mixed_blocks);
     self.high_start = real_high_start;
     return index_len;
 }
@@ -384,7 +388,7 @@ fn compactWholeDataBlocks(self: *Self, all_same_blocks: *AllSameBlocks) !u32 {
                     }
                 }
                 if (!all_same) {
-                    try self.getDataBlock(i);
+                    _ = try self.getDataBlock(i);
                     new_data_capacity += block_len;
                     continue;
                 }
@@ -393,10 +397,10 @@ fn compactWholeDataBlocks(self: *Self, all_same_blocks: *AllSameBlocks) !u32 {
 
         const other = switch (all_same_blocks.findOrAdd(i, inc, value)) {
             .Found => |v| v,
-            .New => null,
+            .Added => null,
             .Overflow => blk: {
                 var j_inc: u32 = SMALL_DATA_BLOCKS_PER_BMP_BLOCK;
-                var j: usize = 0;
+                var j: u32 = 0;
                 while (true) : (j += j_inc) {
                     if (j == i) {
                         all_same_blocks.add(i, inc, value);
@@ -433,14 +437,14 @@ fn compactData(
     {
         var i: u32 = 0;
         while (new_data_len < ASCII_LIMIT) {
-            self.index[i] = new_data_len;
+            self.index[i] = @intCast(new_data_len);
             new_data_len += FAST_DATA_BLOCK_LENGTH;
             i += SMALL_DATA_BLOCKS_PER_BMP_BLOCK;
         }
     }
 
     var block_len: u32 = FAST_DATA_BLOCK_LENGTH;
-    try mixed_blocks.reset(new_data.len, block_len);
+    try mixed_blocks.reset(@intCast(new_data.len), block_len);
     try mixed_blocks.extend(u32, new_data, 0, 0, new_data_len);
 
     const i_limit = self.high_start >> SHIFT_3;
@@ -451,8 +455,8 @@ fn compactData(
         if (i == BMP_I_LIMIT) {
             block_len = SMALL_DATA_BLOCK_LENGTH;
             inc = 1;
-            fast_len = new_data_len;
-            try mixed_blocks.clear(new_data.len, block_len);
+            fast_len = @intCast(new_data_len);
+            try mixed_blocks.reset(@intCast(new_data.len), block_len);
             try mixed_blocks.extend(u32, new_data, 0, 0, new_data_len);
         }
 
@@ -469,7 +473,7 @@ fn compactData(
                         n.? >= fast_len and
                         self.isStartOfSomeFastBlock(n.?))
                     {
-                        n = findAllSameBlock(new_data, n + 1, new_data_len, value, block_len);
+                        n = findAllSameBlock(new_data, n.? + 1, new_data_len, value, block_len);
                     }
                 }
 
@@ -489,11 +493,11 @@ fn compactData(
                 }
             },
             MIXED => {
-                const block = self.data[self.index[i]..block_len];
-                if (mixed_blocks.findBlock(new_data, block)) |n| {
+                const block = self.data[self.index[i]..][0..block_len];
+                if (mixed_blocks.findBlock(u32, u32, new_data, block)) |n| {
                     self.index[i] = n;
                 } else {
-                    var overlap = getOverlap(new_data, new_data_len, block, block_len);
+                    var overlap = getOverlap(u32, u32, new_data, new_data_len, block, block_len);
                     self.index[i] = new_data_len - overlap;
                     const prev_data_len = new_data_len;
                     while (overlap < block_len) {
@@ -566,8 +570,8 @@ fn compactIndex(self: *Self, mixed_blocks: *MixedBlocks) !u32 {
     var i: u32 = 0;
     var j: u32 = 0;
     while (i < BMP_I_LIMIT) : (j += 1) {
-        const idx3 = self.index[i];
-        fast_index[j] = @intCast(i3);
+        var idx3 = self.index[i];
+        fast_index[j] = @intCast(idx3);
         if (idx3 == @as(u32, @intCast(self.data_null_offset.?))) {
             if (idx3_first_null == null) {
                 idx3_first_null = j;
@@ -631,8 +635,9 @@ fn compactIndex(self: *Self, mixed_blocks: *MixedBlocks) !u32 {
             if (oredI3 <= 0xFFFF) {
                 const n = mixed_blocks.findBlock(
                     u16,
+                    u32,
                     &fast_index,
-                    self.index[i..mixed_blocks.block_len],
+                    self.index[i..][0..mixed_blocks.block_len],
                 );
                 if (n) |nn| {
                     self.flags[i] = I3_BMP;
@@ -663,6 +668,9 @@ fn compactIndex(self: *Self, mixed_blocks: *MixedBlocks) !u32 {
         long_i3_blocks = MixedBlocks.init(self.allocator);
         try long_i3_blocks.reset(index16_capacity, INDEX_3_18BIT_BLOCK_LEN);
     }
+    defer if (has_long_idx3_blocks) {
+        long_i3_blocks.deinit();
+    };
 
     var index2: [UNICODE_LIMIT >> SHIFT_2]u16 = undefined;
     var idx2_len: u32 = 0;
@@ -684,22 +692,22 @@ fn compactIndex(self: *Self, mixed_blocks: *MixedBlocks) !u32 {
         } else if (flag == I3_BMP) {
             idx3 = self.index[i];
         } else if (flag == I3_16) {
-            var n = mixed_blocks.findBlock(self.index16, self.index[i..mixed_blocks.block_len]);
+            var n = mixed_blocks.findBlock(u16, u32, self.index16, self.index[i..][0..mixed_blocks.block_len]);
             if (n) |nn| {
                 idx3 = nn;
             } else {
                 if (index_len == index3_start) {
                     n = 0;
                 } else {
-                    n = getOverlap(u16, self.index16, index_len, self.index[i..], INDEX_3_BLOCK_LEN);
+                    n = getOverlap(u16, u32, self.index16, index_len, self.index[i..], INDEX_3_BLOCK_LEN);
                 }
-                idx3 = index_len - n;
+                idx3 = index_len - n.?;
 
                 const prev_index_len = index_len;
-                while (n < INDEX_3_BLOCK_LEN) {
-                    self.index16[index_len] = self.index[i + n];
+                while (n.? < INDEX_3_BLOCK_LEN) {
+                    self.index16[index_len] = @intCast(self.index[i + n.?]);
                     index_len += 1;
-                    n += 1;
+                    n.? += 1;
                 }
                 try mixed_blocks.extend(u16, self.index16, index3_start, prev_index_len, index_len);
                 if (has_long_idx3_blocks) {
@@ -720,24 +728,24 @@ fn compactIndex(self: *Self, mixed_blocks: *MixedBlocks) !u32 {
                 var upper_bits = (v & mask) >> 2;
 
                 for (0..7) |shift| {
-                    self.index16[k] = v;
+                    self.index16[k] = @intCast(v);
                     k += 1;
                     v = self.index[j];
                     j += 1;
-                    upper_bits |= (v & 0x30000) >> (4 + (shift * 2));
+                    upper_bits |= (v & 0x30000) >> (4 + (@as(u5, @intCast(shift)) * 2));
                 }
-                self.index16[k] = v;
+                self.index16[k] = @intCast(v);
                 k += 1;
-                self.index16[k - 9] = upper_bits;
+                self.index16[k - 9] = @intCast(upper_bits);
 
                 if (j < j_limit) continue else break;
             }
 
             const block = self.index16[index_len..long_i3_blocks.block_len];
-            if (long_i3_blocks.findBlock(u16, self.index16, block)) |n| {
+            if (long_i3_blocks.findBlock(u16, u16, self.index16, block)) |n| {
                 idx3 = n | 0x8000;
             } else {
-                var n = if (index_len == index3_start) 0 else getOverlap(self.index16, index_len, self.index16[index_len..], INDEX_3_18BIT_BLOCK_LEN);
+                var n = if (index_len == index3_start) 0 else getOverlap(u16, u16, self.index16, index_len, self.index16[index_len..], INDEX_3_18BIT_BLOCK_LEN);
                 idx3 = (index_len - n) | 0x8000;
 
                 const prev_index_len = index_len;
@@ -752,15 +760,15 @@ fn compactIndex(self: *Self, mixed_blocks: *MixedBlocks) !u32 {
                 } else {
                     index_len += INDEX_3_18BIT_BLOCK_LEN;
                 }
-                try mixed_blocks.extend(self.index16, index3_start, prev_index_len, index_len);
-                try long_i3_blocks.extend(self.index16, index3_start, prev_index_len, index_len);
+                try mixed_blocks.extend(u16, self.index16, index3_start, prev_index_len, index_len);
+                try long_i3_blocks.extend(u16, self.index16, index3_start, prev_index_len, index_len);
             }
         }
 
         if (self.index3_null_offset == null and idx3_first_null != null) {
             self.index3_null_offset = idx3;
         }
-        index2[idx2_len] = idx3;
+        index2[idx2_len] = @intCast(idx3.?);
         idx2_len += 1;
     }
 
@@ -783,10 +791,10 @@ fn compactIndex(self: *Self, mixed_blocks: *MixedBlocks) !u32 {
         var n: ?u32 = undefined;
         if ((idx2_len - 1) >= block_len) {
             std.debug.assert(block_len == INDEX_2_BLOCK_LEN);
-            n = mixed_blocks.findBlock(self.index16, index2[i..mixed_blocks.block_len]);
+            n = mixed_blocks.findBlock(u16, u16, self.index16, index2[i..][0..mixed_blocks.block_len]);
         } else {
             block_len = idx2_len - i;
-            n = findSameBlock(self.index16, index3_start, index2[i..], block_len);
+            n = findSameBlock(self.index16, index3_start, index_len, index2[i..], block_len);
         }
 
         var idx2: u32 = undefined;
@@ -796,7 +804,7 @@ fn compactIndex(self: *Self, mixed_blocks: *MixedBlocks) !u32 {
             if (index_len == index3_start) {
                 n = 0;
             } else {
-                n = getOverlap(u16, self.index16, index_len, index2[i..], block_len);
+                n = getOverlap(u16, u16, self.index16, index_len, index2[i..], block_len);
             }
             idx2 = index_len - n.?;
 
@@ -808,7 +816,7 @@ fn compactIndex(self: *Self, mixed_blocks: *MixedBlocks) !u32 {
             }
             try mixed_blocks.extend(u16, self.index16, index3_start, prev_index_len, index_len);
         }
-        self.index16[idx1] = idx2;
+        self.index16[idx1] = @intCast(idx2);
         idx1 += 1;
     }
 
@@ -818,11 +826,16 @@ fn compactIndex(self: *Self, mixed_blocks: *MixedBlocks) !u32 {
     return index_len;
 }
 
-fn getOverlap(comptime Int: type, p: []const Int, p_len: Int, q: []const u32, block_len: u32) u32 {
+fn getOverlap(comptime IntA: type, comptime IntB: type, p: []const IntA, p_len: u32, q: []const IntB, block_len: u32) u32 {
     var overlap = block_len - 1;
-    while (overlap > 0 and
-        !std.mem.eql(Int, p[p_len - overlap ..][0..overlap], q[0..overlap]))
-    {
+    while (overlap > 0) {
+        const ps = p[p_len - overlap ..][0..overlap];
+        const qs = q[0..overlap];
+        for (ps, qs) |psv, qsv| {
+            if (psv != qsv) {
+                break;
+            }
+        }
         overlap -= 1;
     }
     return overlap;
@@ -856,15 +869,15 @@ const AllSameBlocks = struct {
         if (self.most_recent) |most_recent| {
             if (self.values[most_recent] == value) {
                 self.ref_counts[most_recent] += count;
-                return self.indexes[most_recent];
+                return .{ .Found = self.indexes[most_recent] };
             }
         }
 
         for (0..self.len) |i| {
             if (self.values[i] == value) {
-                self.most_recent = i;
+                self.most_recent = @intCast(i);
                 self.ref_counts[i] += count;
-                return self.indexes[i];
+                return .{ .Found = self.indexes[i] };
             }
         }
 
@@ -886,7 +899,7 @@ const AllSameBlocks = struct {
         var least_count: u32 = I_LIMIT;
         for (0..self.len) |i| {
             if (self.ref_counts[i] < least_count) {
-                least = i;
+                least = @intCast(i);
                 least_count = self.ref_counts[i];
             }
         }
@@ -897,7 +910,7 @@ const AllSameBlocks = struct {
         self.ref_counts[i] = count;
     }
 
-    fn findMostUsed(self: *Self) ?u32 {
+    fn findMostUsed(self: *AllSameBlocks) ?u32 {
         if (self.len == 0) {
             return null;
         }
@@ -906,7 +919,7 @@ const AllSameBlocks = struct {
         var max_count: u32 = 0;
         for (0..self.len) |i| {
             if (self.ref_counts[i] > max_count) {
-                max = i;
+                max = @intCast(i);
                 max_count = self.ref_counts[i];
             }
         }
@@ -916,13 +929,17 @@ const AllSameBlocks = struct {
 
 const MixedBlocks = struct {
     entries: std.AutoHashMap(u32, void),
-    block_len: u32,
+    block_len: usize,
 
     fn init(allocator: std.mem.Allocator) MixedBlocks {
         return MixedBlocks{
             .entries = std.AutoHashMap(u32, void).init(allocator),
             .block_len = 0,
         };
+    }
+
+    fn deinit(self: *MixedBlocks) void {
+        self.entries.deinit();
     }
 
     fn reset(self: *MixedBlocks, capacity: u32, block_len: usize) !void {
@@ -936,29 +953,29 @@ const MixedBlocks = struct {
         comptime Int: type,
         data: []const Int,
         min_start: u32,
-        prev_data_len: i32,
+        prev_data_len: u32,
         new_data_len: u32,
     ) !void {
-        var start = prev_data_len - self.block_len;
+        var start = @as(i32, @intCast(prev_data_len)) - @as(i32, @intCast(self.block_len));
         if (start >= min_start) {
             start += 1;
         } else {
-            start = min_start;
+            start = @intCast(min_start);
         }
 
         const end = new_data_len - self.block_len;
         while (start <= end) : (start += 1) {
-            const block = data[start..][0..self.block_len];
-            const gop = try self.entries.getOrPutAdapted(block, BlockContext(Int){
+            const block = data[@intCast(start)..][0..self.block_len];
+            const gop = try self.entries.getOrPutAdapted(block, BlockContext(Int, Int){
                 .data = data,
                 .block_len = self.block_len,
             });
-            gop.key_ptr.* = start;
+            gop.key_ptr.* = @intCast(start);
         }
     }
 
-    fn findBlock(self: *MixedBlocks, comptime Int: type, data: []const Int, block: []const Int) ?u32 {
-        return self.entries.getKeyAdapted(block, BlockContext(Int){
+    fn findBlock(self: *MixedBlocks, comptime IntA: type, comptime IntB: type, data: []const IntA, block: []const IntB) ?u32 {
+        return self.entries.getKeyAdapted(block, BlockContext(IntA, IntB){
             .data = data,
             .block_len = self.block_len,
         });
@@ -971,21 +988,21 @@ const MixedBlocks = struct {
         });
     }
 
-    fn BlockContext(comptime Int: type) type {
+    fn BlockContext(comptime IntA: type, comptime IntB: type) type {
         return struct {
-            data: []const Int,
-            block_len: u32,
+            data: []const IntA,
+            block_len: usize,
 
-            pub fn hash(_: BlockContext, block: []const Int) u64 {
+            pub fn hash(_: @This(), block: []const IntB) u64 {
                 var hasher = std.hash.Wyhash.init(0);
                 for (block) |value| {
-                    const bytes: [@sizeOf(Int)]u8 = @bitCast(value);
+                    const bytes: [@sizeOf(IntB)]u8 = @bitCast(value);
                     hasher.update(&bytes);
                 }
                 return hasher.final();
             }
 
-            pub fn eql(ctx: BlockContext, block: []const Int, key: u32) bool {
+            pub fn eql(ctx: @This(), block: []const IntB, key: u32) bool {
                 const data = ctx.data[key..];
                 for (0..ctx.block_len) |i| {
                     if (data[i] != block[i]) {
@@ -1030,36 +1047,36 @@ const I3_BMP = 1;
 const I3_16 = 2;
 const I3_18 = 3;
 
-const MAX_UNICODE = 0x10FFFF;
-const UNICODE_LIMIT = 0x110000;
-const BMP_LIMIT = 0x10000;
-const ASCII_LIMIT = 0x80;
-const FAST_SHIFT = 6;
-const SHIFT_3 = 4;
-const SHIFT_2 = 5 + SHIFT_3;
-const SHIFT_1 = 5 + SHIFT_2;
-const SHIFT_2_3 = SHIFT_2 - SHIFT_3;
-const SHIFT_1_2 = SHIFT_1 - SHIFT_2;
-const I_LIMIT = UNICODE_LIMIT >> SHIFT_3;
-const BMP_I_LIMIT = BMP_LIMIT >> SHIFT_3;
-const ASCII_I_LIMIT = ASCII_LIMIT >> SHIFT_3;
-const CP_PER_INDEX_2_ENTRY = 1 << SHIFT_2;
-const INDEX_2_BLOCK_LEN = 1 << SHIFT_1_2;
-const INDEX_2_MASK = INDEX_2_BLOCK_LEN - 1;
-const SMALL_DATA_BLOCK_LENGTH = 1 << SHIFT_3;
-const SMALL_DATA_MASK = SMALL_DATA_BLOCK_LENGTH - 1;
-const SMALL_DATA_BLOCKS_PER_BMP_BLOCK = 1 << (FAST_SHIFT - SHIFT_3);
-const FAST_DATA_BLOCK_LENGTH = 1 << FAST_SHIFT;
-const FAST_DATA_MASK = FAST_DATA_BLOCK_LENGTH - 1;
-const INDEX_3_BLOCK_LEN = 1 << SHIFT_2_3;
-const INDEX_3_MASK = INDEX_3_BLOCK_LEN - 1;
-const INDEX_3_18BIT_BLOCK_LEN = INDEX_3_BLOCK_LEN + (INDEX_3_BLOCK_LEN / 8);
-const NO_DATA_NULL_OFFSET = 0xFFFFF;
-const NO_INDEX3_NULL_OFFSET = 0x7FFF;
-const BMP_INDEX_LEN = BMP_LIMIT >> FAST_SHIFT;
+const MAX_UNICODE: u32 = 0x10FFFF;
+const UNICODE_LIMIT: u32 = 0x110000;
+const BMP_LIMIT: u32 = 0x10000;
+const ASCII_LIMIT: u32 = 0x80;
+const FAST_SHIFT: u32 = 6;
+const SHIFT_3: u32 = 4;
+const SHIFT_2: u32 = 5 + SHIFT_3;
+const SHIFT_1: u32 = 5 + SHIFT_2;
+const SHIFT_2_3: u32 = SHIFT_2 - SHIFT_3;
+const SHIFT_1_2: u32 = SHIFT_1 - SHIFT_2;
+const I_LIMIT: u32 = UNICODE_LIMIT >> SHIFT_3;
+const BMP_I_LIMIT: u32 = BMP_LIMIT >> SHIFT_3;
+const ASCII_I_LIMIT: u32 = ASCII_LIMIT >> SHIFT_3;
+const CP_PER_INDEX_2_ENTRY: u32 = 1 << SHIFT_2;
+const INDEX_2_BLOCK_LEN: u32 = 1 << SHIFT_1_2;
+const INDEX_2_MASK: u32 = INDEX_2_BLOCK_LEN - 1;
+const SMALL_DATA_BLOCK_LENGTH: u32 = 1 << SHIFT_3;
+const SMALL_DATA_MASK: u32 = SMALL_DATA_BLOCK_LENGTH - 1;
+const SMALL_DATA_BLOCKS_PER_BMP_BLOCK: u32 = 1 << (FAST_SHIFT - SHIFT_3);
+const FAST_DATA_BLOCK_LENGTH: u32 = 1 << FAST_SHIFT;
+const FAST_DATA_MASK: u32 = FAST_DATA_BLOCK_LENGTH - 1;
+const INDEX_3_BLOCK_LEN: u32 = 1 << SHIFT_2_3;
+const INDEX_3_MASK: u32 = INDEX_3_BLOCK_LEN - 1;
+const INDEX_3_18BIT_BLOCK_LEN: u32 = INDEX_3_BLOCK_LEN + (INDEX_3_BLOCK_LEN / 8);
+const NO_DATA_NULL_OFFSET: u32 = 0xFFFFF;
+const NO_INDEX3_NULL_OFFSET: u32 = 0x7FFF;
+const BMP_INDEX_LEN: u32 = BMP_LIMIT >> FAST_SHIFT;
 
-const INITIAL_DATA_LEN = 1 << 14;
-const MEDIUM_DATA_LEN = 1 << 17;
-const MAX_DATA_LEN = UNICODE_LIMIT;
+const INITIAL_DATA_LEN: u32 = 1 << 14;
+const MEDIUM_DATA_LEN: u32 = 1 << 17;
+const MAX_DATA_LEN: u32 = UNICODE_LIMIT;
 
-const FLAGS_LEN = UNICODE_LIMIT >> SHIFT_3;
+const FLAGS_LEN: u32 = UNICODE_LIMIT >> SHIFT_3;
