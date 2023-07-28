@@ -12,21 +12,19 @@ pub const Range = struct {
 };
 const Self = @This();
 
-pub fn read(
-    allocator: std.mem.Allocator,
-    file_path: []const u8,
-    filters: []const []const u8,
-) !Self {
-    var self = Self{
+pub fn init(allocator: std.mem.Allocator) Self {
+    return Self{
         .allocator = allocator,
         .entries = Entries.init(allocator),
     };
+}
 
+pub fn read(self: *Self, file_path: []const u8, filters: []const []const u8) !void {
     const file = try std.fs.openFileAbsolute(file_path, .{});
     defer file.close();
 
-    const bytes = try file.readToEndAlloc(allocator, 10_000_000);
-    defer allocator.free(bytes);
+    const bytes = try file.readToEndAlloc(self.allocator, 10_000_000);
+    defer self.allocator.free(bytes);
 
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     var range: ?Range = null;
@@ -63,8 +61,6 @@ pub fn read(
         name = info.name;
     }
     try self.add(name, range.?);
-
-    return self;
 }
 
 fn parseLine(line: []const u8) !struct { start: u32, end: ?u32, name: []const u8 } {
@@ -85,7 +81,7 @@ fn parseLine(line: []const u8) !struct { start: u32, end: ?u32, name: []const u8
         };
 }
 
-fn add(self: *Self, name: []const u8, range: Range) !void {
+pub fn add(self: *Self, name: []const u8, range: Range) !void {
     const gop = try self.entries.getOrPut(name);
     if (!gop.found_existing) {
         gop.key_ptr.* = try self.allocator.dupe(u8, name);

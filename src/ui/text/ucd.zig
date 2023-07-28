@@ -49,16 +49,22 @@ pub fn trieValue(comptime Trie: type, code_point: []const u8) !Trie.Value {
 }
 
 pub fn breakTest(comptime BreakTest: type, initFn: anytype) !void {
-    for (BreakTest.cases) |case| {
+    for (BreakTest.cases, 0..) |case, case_i| {
         var iter = initFn(case[0]);
         const expected = case[1];
-        for (expected) |exp| {
+        for (expected, 0..) |exp, exp_i| {
             const grapheme = if (try iter.next()) |slice| slice else return error.TestExpectedMoreGraphemes;
             var grapheme_iter = ReverseUtf8Iterator.init(grapheme);
             const break_code_point = grapheme_iter.next().?;
             const actual: u32 = @intCast(try std.unicode.utf8Decode(break_code_point));
-            try std.testing.expectEqual(exp, actual);
+            std.testing.expectEqual(exp, actual) catch |e| {
+                std.debug.print("\nFAILED BREAK TEST: {} -- {}\n", .{ case_i, exp_i });
+                return e;
+            };
         }
-        try std.testing.expectEqual(@as(?[]const u8, null), try iter.next());
+        std.testing.expectEqual(@as(?[]const u8, null), try iter.next()) catch |e| {
+            std.debug.print("\nBREAK TEST OVERFLOWED: {}\n", .{case_i});
+            return e;
+        };
     }
 }

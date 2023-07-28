@@ -3,6 +3,7 @@ const util = @import("util.zig");
 const BreakTest = @import("ucd/BreakTest.zig");
 const Property = @import("ucd/Property.zig");
 const TrieBuilder = @import("ucd/TrieBuilder.zig");
+const UnicodeData = @import("ucd/UnicodeData.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -17,14 +18,58 @@ pub fn main() !void {
     const gen = try Gen.init(allocator, lib_root);
     defer gen.deinit();
 
+    var data = try gen.loadUnicodeData();
+    defer data.deinit();
+    try gen.generalCategoryTrie(&data, "GeneralCategory.zig");
+
     var emoji_property = try gen.loadProperty("emoji/emoji-data.txt", &.{"Extended_Pictographic"});
     defer emoji_property.deinit();
 
-    try gen.propertyTrie("auxiliary/GraphemeBreakProperty.txt", &emoji_property);
-    try gen.propertyTrie("auxiliary/WordBreakProperty.txt", &emoji_property);
+    try gen.propertyTrie("auxiliary/GraphemeBreakProperty.txt", "GraphemeBreakProperty.zig", &emoji_property);
+    try gen.propertyTrie("auxiliary/WordBreakProperty.txt", "WordBreakProperty.zig", &emoji_property);
 
-    try gen.breakTest("auxiliary/GraphemeBreakTest.txt");
-    try gen.breakTest("auxiliary/WordBreakTest.txt");
+    var line_break_property_extra = Property.init(allocator);
+    defer line_break_property_extra.deinit();
+
+    try line_break_property_extra.add("ID", .{
+        .start = 0x3400,
+        .end = 0x4DBF,
+    });
+    try line_break_property_extra.add("ID", .{
+        .start = 0x4E00,
+        .end = 0x9FFF,
+    });
+    try line_break_property_extra.add("ID", .{
+        .start = 0xF900,
+        .end = 0xFAFF,
+    });
+    try line_break_property_extra.add("ID", .{
+        .start = 0x20000,
+        .end = 0x2FFFD,
+    });
+    try line_break_property_extra.add("ID", .{
+        .start = 0x30000,
+        .end = 0x3FFFD,
+    });
+    try line_break_property_extra.add("ID", .{
+        .start = 0x1F000,
+        .end = 0x1FAFF,
+    });
+    try line_break_property_extra.add("ID", .{
+        .start = 0x1FC00,
+        .end = 0x1FFFD,
+    });
+    try line_break_property_extra.add("PR", .{
+        .start = 0x20A0,
+        .end = 0x20CF,
+    });
+
+    try gen.propertyTrie("LineBreak.txt", "LineBreakProperty.zig", &line_break_property_extra);
+    try gen.propertyTrie("EastAsianWidth.txt", "EastAsianWidth.zig", null);
+
+    try gen.breakTest("auxiliary/GraphemeBreakTest.txt", "GraphemeBreakTest.zig");
+    try gen.breakTest("auxiliary/WordBreakTest.txt", "WordBreakTest.zig");
+    try gen.breakTest("auxiliary/LineBreakTest.txt", "LineBreakTest.zig");
 }
 
 const Gen = struct {
@@ -45,13 +90,48 @@ const Gen = struct {
         self.allocator.free(self.cache_root);
     }
 
-    fn propertyTrie(self: Gen, comptime ucd_path: []const u8, extend: ?*const Property) !void {
-        var property = try self.loadProperty(ucd_path, &.{});
+    fn generalCategoryTrie(self: Gen, data: *UnicodeData, comptime code_file_name: []const u8) !void {
+        const trie = blk: {
+            var builder = try TrieBuilder.init(
+                self.allocator,
+                @intCast(data.categories.count()),
+                @intCast(data.categories.count() + 1),
+            );
+            defer builder.deinit();
+
+            for (data.entries.items) |entry| {
+                const value = data.categories.getIndex(entry.category).?;
+                try builder.setRange(entry.start, entry.end, @intCast(value));
+            }
+
+            break :blk try builder.build();
+        };
+        defer trie.deinit();
+
+        var buf = std.ArrayList(u8).init(self.allocator);
+        defer buf.deinit();
+
+        try writeTrie(&buf, &trie, data.categories.keys());
+        try self.genCodeFile(code_file_name, buf.items);
+    }
+
+    fn loadUnicodeData(self: Gen) !UnicodeData {
+        const cached_file_path = try self.cachedFilePath("UnicodeData.txt");
+        defer self.allocator.free(cached_file_path);
+        return try UnicodeData.read(self.allocator, cached_file_path);
+    }
+
+    fn propertyTrie(self: Gen, comptime ucd_path: []const u8, comptime code_file_name: []const u8, extend: ?*const Property) !void {
+        var property = Property.init(self.allocator);
         defer property.deinit();
 
         if (extend) |ext| {
             try property.extend(ext);
         }
+
+        const cached_file_path = try self.cachedFilePath(ucd_path);
+        defer self.allocator.free(cached_file_path);
+        try property.read(cached_file_path, &.{});
 
         const trie = blk: {
             var builder = try TrieBuilder.init(
@@ -77,48 +157,19 @@ const Gen = struct {
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
-        var formatter = ArrayDataFormatter{ .buf = &buf };
-        const keys = property.entries.keys();
-
-        try buf.appendSlice("pub const Value = enum {\n");
-        for (keys) |key| {
-            try std.fmt.format(buf.writer(), "    {s},\n", .{key});
-        }
-        try buf.appendSlice("    Any,\n");
-        try buf.appendSlice("    Error,\n");
-        try buf.appendSlice("};\n");
-
-        try buf.appendSlice("pub const index = [_]u16 {");
-        for (trie.index) |val| {
-            try formatter.next("0x{X}", val);
-        }
-        try buf.appendSlice("\n};\n");
-
-        formatter.width = 0;
-        try buf.appendSlice("pub const data = [_]Value{");
-        for (trie.data) |val| {
-            const name = if (val < keys.len)
-                keys[val]
-            else if (val == keys.len)
-                "Any"
-            else
-                "Error";
-            try formatter.next(".{s}", name);
-        }
-        try buf.appendSlice("\n};\n");
-
-        try std.fmt.format(buf.writer(), "pub const high_start = 0x{X};", .{trie.high_start});
-
-        try self.genCodeFile(ucd_path, buf.items);
+        try writeTrie(&buf, &trie, property.entries.keys());
+        try self.genCodeFile(code_file_name, buf.items);
     }
 
     fn loadProperty(self: Gen, comptime ucd_path: []const u8, filters: []const []const u8) !Property {
         const cached_file_path = try self.cachedFilePath(ucd_path);
         defer self.allocator.free(cached_file_path);
-        return try Property.read(self.allocator, cached_file_path, filters);
+        var property = Property.init(self.allocator);
+        try property.read(cached_file_path, filters);
+        return property;
     }
 
-    fn breakTest(self: Gen, comptime ucd_path: []const u8) !void {
+    fn breakTest(self: Gen, comptime ucd_path: []const u8, comptime code_file_name: []const u8) !void {
         const cached_file_path = try self.cachedFilePath(ucd_path);
         defer self.allocator.free(cached_file_path);
 
@@ -147,7 +198,7 @@ const Gen = struct {
         }
         try buf.appendSlice("};\n");
 
-        try self.genCodeFile(ucd_path, buf.items);
+        try self.genCodeFile(code_file_name, buf.items);
     }
 
     fn cachedFilePath(self: Gen, comptime ucd_path: []const u8) ![]const u8 {
@@ -165,13 +216,7 @@ const Gen = struct {
         return util.ensureCachedFile(self.allocator, self.cache_root, file, url);
     }
 
-    fn genCodeFile(self: Gen, comptime ucd_path: []const u8, bytes: []const u8) !void {
-        const code_file_name = comptime blk: {
-            var split = std.mem.splitScalar(u8, ucd_path, '/');
-            _ = split.next().?;
-            split = std.mem.splitScalar(u8, split.next().?, '.');
-            break :blk split.first() ++ ".zig";
-        };
+    fn genCodeFile(self: Gen, comptime code_file_name: []const u8, bytes: []const u8) !void {
         const code_file_path = try std.fs.path.join(self.allocator, &.{ self.code_root, code_file_name });
         defer self.allocator.free(code_file_path);
 
@@ -181,6 +226,39 @@ const Gen = struct {
         try code_file.writeAll(bytes);
     }
 };
+
+fn writeTrie(buf: *std.ArrayList(u8), trie: *const TrieBuilder.Trie, values: []const []const u8) !void {
+    var formatter = ArrayDataFormatter{ .buf = buf };
+
+    try buf.appendSlice("pub const Value = enum {\n");
+    for (values) |value| {
+        try std.fmt.format(buf.writer(), "    {s},\n", .{value});
+    }
+    try buf.appendSlice("    Any,\n");
+    try buf.appendSlice("    Error,\n");
+    try buf.appendSlice("};\n");
+
+    try buf.appendSlice("pub const index = [_]u16 {");
+    for (trie.index) |val| {
+        try formatter.next("0x{X}", val);
+    }
+    try buf.appendSlice("\n};\n");
+
+    formatter.width = 0;
+    try buf.appendSlice("pub const data = [_]Value{");
+    for (trie.data) |val| {
+        const value = if (val < values.len)
+            values[val]
+        else if (val == values.len)
+            "Any"
+        else
+            "Error";
+        try formatter.next(".{s}", value);
+    }
+    try buf.appendSlice("\n};\n");
+
+    try std.fmt.format(buf.writer(), "pub const high_start = 0x{X};", .{trie.high_start});
+}
 
 const ArrayDataFormatter = struct {
     width: usize = 0,

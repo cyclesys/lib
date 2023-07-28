@@ -1,4 +1,5 @@
 pub const Value = enum {
+    Extended_Pictographic,
     Prepend,
     CR,
     LF,
@@ -12,7 +13,6 @@ pub const Value = enum {
     LV,
     LVT,
     ZWJ,
-    Extended_Pictographic,
     Any,
     Error,
 };

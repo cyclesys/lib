@@ -23,5 +23,6 @@ pub const render = tree.render;
 
 test {
     _ = @import("ui/text/GraphemeBreak.zig");
+    _ = @import("ui/text/LineBreak.zig");
     _ = @import("ui/text/WordBreak.zig");
 }
