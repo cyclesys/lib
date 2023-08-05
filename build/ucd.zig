@@ -158,7 +158,7 @@ fn genBidiBrackets(ctx: Context) !void {
     );
 
     try buf.appendSlice(
-        \\pub fn get(c: u32) Bracket {
+        \\pub fn get(c: u32) ?Bracket {
         \\    return switch (c) {
         \\
     );
@@ -177,7 +177,7 @@ fn genBidiBrackets(ctx: Context) !void {
         try buf.appendSlice("        },\n");
     }
     try buf.appendSlice(
-        \\        else => unreachable,
+        \\        else => null,
         \\    };
         \\}
     );

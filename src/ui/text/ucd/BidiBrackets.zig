@@ -8,7 +8,7 @@ pub const BracketType = enum {
     opening,
     closing,
 };
-pub fn get(c: u32) Bracket {
+pub fn get(c: u32) ?Bracket {
     return switch (c) {
         '\u{0028}' => Bracket{
             .pair = '\u{0029}',
@@ -522,6 +522,6 @@ pub fn get(c: u32) Bracket {
             .pair = '\u{FF62}',
             .type = .closing,
         },
-        else => unreachable,
+        else => null,
     };
 }

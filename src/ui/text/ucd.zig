@@ -1,7 +1,11 @@
 const std = @import("std");
 const ReverseUtf8Iterator = @import("ReverseUtf8Iterator.zig");
 
-pub fn trieValue(comptime Trie: type, code_point: []const u8) !Trie.Value {
+pub fn trieValue(comptime Trie: type, c: []const u8) !Trie.Value {
+    return trieValueDecoded(Trie, try std.unicode.utf8Decode(c));
+}
+
+pub fn trieValueDecoded(comptime Trie: type, c: u32) Trie.Value {
     const FAST_SHIFT = 6;
     const FAST_DATA_BLOCK_LEN = 1 << FAST_SHIFT;
     const FAST_DATA_MASK = FAST_DATA_BLOCK_LEN - 1;
@@ -21,7 +25,6 @@ pub fn trieValue(comptime Trie: type, code_point: []const u8) !Trie.Value {
     const ERROR_VALUE_NEG_DATA_OFFSET = 1;
     const HIGH_VALUE_NEG_DATA_OFFSET = 2;
 
-    const c: u32 = @intCast(try std.unicode.utf8Decode(code_point));
     if (c <= 0xFFFF) {
         return Trie.data[Trie.index[c >> FAST_SHIFT] + (c & FAST_DATA_MASK)];
     }
