@@ -29,6 +29,117 @@ pub fn main() !void {
     }
 
     try genBidiBrackets(ctx);
+    {
+        var derived_bidi_extra = Property.init(allocator);
+        defer derived_bidi_extra.deinit();
+
+        try derived_bidi_extra.add("L", .{
+            .start = 0x0000,
+            .end = 0x10FFFF,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0x0590,
+            .end = 0x05FF,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0x0600,
+            .end = 0x07BF,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0x07C0,
+            .end = 0x085F,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0x0860,
+            .end = 0x08FF,
+        });
+        try derived_bidi_extra.add("ET", .{
+            .start = 0x20A0,
+            .end = 0x20CF,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0xFB1D,
+            .end = 0xFB4F,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0xFB50,
+            .end = 0xFDCF,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0xFDF0,
+            .end = 0xFDFF,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0xFE70,
+            .end = 0xFEFF,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0x10800,
+            .end = 0x10CFF,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0x10D00,
+            .end = 0x10D3F,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0x10D40,
+            .end = 0x10EBF,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0x10EC0,
+            .end = 0x10EFF,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0x10F00,
+            .end = 0x10F2F,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0x10F30,
+            .end = 0x10F6F,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0x10F70,
+            .end = 0x10FFF,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0x1E800,
+            .end = 0x1EC6F,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0x1EC70,
+            .end = 0x1ECBF,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0x1ECC0,
+            .end = 0x1ECFF,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0x1ED00,
+            .end = 0x1ED4F,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0x1ED50,
+            .end = 0x1EDFF,
+        });
+        try derived_bidi_extra.add("AL", .{
+            .start = 0x1EE00,
+            .end = 0x1EEFF,
+        });
+        try derived_bidi_extra.add("R", .{
+            .start = 0x1EF00,
+            .end = 0x1EFFF,
+        });
+
+        try genPropertyTrie(ctx, "extracted/DerivedBidiClass.txt", "DerivedBidi.zig", &derived_bidi_extra);
+    }
+
+    {
+        const cache_root = try std.fs.path.join(allocator, &.{ lib_root, "src", "ui", "text", "ucd" });
+        defer allocator.free(cache_root);
+
+        const file_path = try util.ensureCachedFile(allocator, cache_root, "BidiTest.txt", comptime ucdUrl("BidiTest.txt"));
+        allocator.free(file_path);
+    }
 
     {
         var emoji_property = try loadProperty(ctx, "emoji/emoji-data.txt", &.{"Extended_Pictographic"});
@@ -278,11 +389,13 @@ fn cachedFilePath(ctx: Context, comptime ucd_path: []const u8) ![]const u8 {
         break :blk versionStr('_') ++ "-" ++ norm_name;
     };
 
-    const url = comptime blk: {
-        break :blk "https://www.unicode.org/Public/" ++ versionStr('.') ++ "/ucd/" ++ ucd_path;
-    };
+    const url = comptime ucdUrl(ucd_path);
 
     return util.ensureCachedFile(ctx.allocator, ctx.cache_root, file, url);
+}
+
+fn ucdUrl(comptime ucd_path: []const u8) []const u8 {
+    return "https://www.unicode.org/Public/" ++ versionStr('.') ++ "/ucd/" ++ ucd_path;
 }
 
 fn genCodeFile(ctx: Context, comptime code_file_name: []const u8, bytes: []const u8) !void {

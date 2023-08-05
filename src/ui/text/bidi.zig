@@ -6,609 +6,195 @@ const BidiCategory = @import("ucd/BidiCategory.zig");
 
 pub const Level = u8;
 
-pub fn resolve(allocator: std.mem.Allocator, chars: []const u32, infos: []const CharInfo) ![]const Level {
-    std.debug.assert(chars.len == infos.len);
+pub const Paragraph = struct {
+    start: usize,
+    end: usize,
+    level: Level,
 
-    var levels = try allocator.alloc(Level, chars.len);
+    pub inline fn slice(self: Paragraph, s: anytype) @TypeOf(s) {
+        return s[self.start..self.end];
+    }
+};
 
-    var cats = try allocator.alloc(BidiCategory.Value, chars.len);
+pub fn split(allocator: std.mem.Allocator, infos: []const CharInfo) ![]const Paragraph {
+    var paragraphs = std.ArrayList(Paragraph).init(allocator);
+
+    var start: usize = 0;
+    var isolate_count: usize = 0;
+    var level: ?u8 = null;
+    for (infos, 0..) |info, i| {
+        switch (info.bidi) {
+            .B => {
+                try paragraphs.append(Paragraph{
+                    .start = start,
+                    .end = i + 1,
+                    .level = level orelse 0,
+                });
+                start = i + 1;
+                isolate_count = 0;
+                level = null;
+            },
+            .LRI, .RLI, .FSI => isolate_count += 1,
+            .PDI => if (isolate_count > 0) {
+                isolate_count -= 1;
+            },
+            .L => if (level == null and isolate_count == 0) {
+                level = 0;
+            },
+            .R, .AL => if (level == null and isolate_count == 0) {
+                level = 1;
+            },
+            else => {},
+        }
+    }
+
+    return try paragraphs.toOwnedSlice();
+}
+
+pub fn reorder(
+    allocator: std.mem.Allocator,
+    infos: []const CharInfo,
+    levels: []Level,
+    paragraph_level: Level,
+) ![]const usize {
+    std.debug.assert(infos.len > 0);
+    std.debug.assert(infos.len == levels.len);
+    var seq_start: ?usize = null;
+    for (infos, 0..) |info, i| {
+        if (ignoreCat(info.bidi)) {
+            continue;
+        }
+
+        switch (info.bidi) {
+            .B, .S => {
+                levels[i] = paragraph_level;
+                if (seq_start) |ss| {
+                    @memset(levels[ss..i], paragraph_level);
+                }
+            },
+            .WS, .RLI, .LRI, .FSI, .PDI => {
+                if (seq_start == null) {
+                    seq_start = i;
+                }
+            },
+            else => {
+                seq_start = null;
+            },
+        }
+    }
+    if (seq_start) |ss| {
+        @memset(levels[ss..], paragraph_level);
+    }
+
+    var min_level = levels[0];
+    var max_level = min_level;
+    var prev_level = min_level;
+    for (0..levels.len) |i| {
+        if (ignoreCat(infos[i].bidi)) {
+            continue;
+        }
+        const level = levels[i];
+        if (level != prev_level) {
+            min_level = @min(min_level, level);
+            max_level = @max(max_level, level);
+            prev_level = level;
+        }
+    }
+
+    var order = std.ArrayList(usize).init(allocator);
+    for (infos, 0..) |info, index| {
+        if (ignoreCat(info.bidi)) {
+            continue;
+        }
+        try order.append(index);
+    }
+
+    min_level = if (min_level % 2 == 1) min_level else min_level + 1;
+
+    var level = max_level;
+    while (level >= min_level) : (level -= 1) {
+        var index: usize = 0;
+        var level_start: ?usize = null;
+        for (infos, 0..) |info, i| {
+            if (ignoreCat(info.bidi)) {
+                continue;
+            }
+
+            if (levels[i] >= level) {
+                if (level_start == null) {
+                    level_start = index;
+                }
+            } else if (level_start) |start| {
+                std.mem.reverse(usize, order.items[start..index]);
+                level_start = null;
+            }
+            index += 1;
+        }
+        if (level_start) |start| {
+            std.mem.reverse(usize, order.items[start..]);
+        }
+    }
+
+    return order.toOwnedSlice();
+}
+
+pub fn resolve(
+    allocator: std.mem.Allocator,
+    chars: []const u32,
+    infos: []const CharInfo,
+    paragraph_level: Level,
+) ![]Level {
+    const levels = try allocator.alloc(Level, chars.len);
+    @memset(levels, 0);
+
+    const cats = try allocator.alloc(BidiCat, chars.len);
     defer allocator.free(cats);
 
-    var iter = ParagraphIterator{ .chars = chars, .infos = infos };
-    while (iter.next()) |paragraph| {
-        const paragraph_chars = chars[paragraph.start..paragraph.end];
-        const paragraph_infos = infos[paragraph.start..paragraph.end];
-        const paragraph_levels = levels[paragraph.start..paragraph.end];
-        const paragraph_cats = cats[paragraph.start..paragraph.end];
+    resolveExplicitTypes(infos, levels, cats, paragraph_level);
 
-        resolveExplicit(paragraph_infos, paragraph_levels, paragraph_cats, paragraph.level);
+    const sequences = try resolveSequences(allocator, levels, cats, paragraph_level);
+    defer freeSequences(allocator, sequences);
 
-        const paragraph_sequences = try resolveSequences(allocator, paragraph_levels, paragraph_cats, paragraph.level);
-        defer allocator.free(paragraph_sequences);
+    resolveWeakTypes(infos, cats, sequences);
+    try resolveNeutralTypes(allocator, chars, infos, cats, sequences);
 
-        resolveWeakTypes(paragraph_sequences);
-        try resolveNeutralTypes(allocator, paragraph_chars, paragraph_cats, paragraph_sequences);
-        resolveImplicitLevels(paragraph_levels, paragraph_cats, paragraph_sequences);
-    }
+    resolveImplicitLevels(levels, cats, sequences);
 
     return levels;
 }
 
-const ParagraphIterator = struct {
-    chars: []const u32,
-    infos: []const CharInfo,
-    i: usize = 0,
-
-    fn next(self: *ParagraphIterator) ?Paragraph {
-        if (self.i >= self.chars.len) {
-            return null;
-        }
-
-        const start = self.i;
-        var isolate_count: usize = 0;
-        var level: ?u8 = null;
-        for (self.infos[start..]) |info| {
-            self.i += 1;
-            switch (info.bidi) {
-                .B => break,
-                .LRI, .RLI, .FSI => isolate_count += 1,
-                .PDI => if (isolate_count > 0) {
-                    isolate_count -= 1;
-                },
-                .L => if (level == null and isolate_count == 0) {
-                    level = 0;
-                },
-                .R, .AL => if (level == null and isolate_count == 0) {
-                    level = 1;
-                },
-                else => continue,
-            }
-        }
-
-        return Paragraph{
-            .start = start,
-            .end = self.i,
-            .level = level orelse 0,
-        };
-    }
-};
-
-fn resolveImplicitLevels(levels: []Level, cats: []const BidiCategory.Value, sequences: []Sequence) void {
-    for (sequences) |seq| {
-        for (seq.runs) |run| {
-            for (run.start..run.end) |ii| {
-                if (seq.level % 2 == 0) {
-                    switch (cats[ii]) {
-                        .R => {
-                            levels[ii] += 1;
-                        },
-                        .AN, .EN => {
-                            levels[ii] += 2;
-                        },
-                        else => {},
-                    }
-                } else {
-                    switch (cats[ii]) {
-                        .L, .EN, .AN => {
-                            levels[ii] += 1;
-                        },
-                        else => {},
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn resolveNeutralTypes(
-    allocator: std.mem.Allocator,
-    chars: []const u32,
-    cats: []BidiCategory.Value,
-    sequences: []const Sequence,
-) !void {
-    for (sequences) |seq| {
-        const dir: BidiCategory.Value = if (seq.level % 2 == 0) .L else .R;
-
-        const pairs = try resolveBracketPairs(allocator, seq);
-        defer allocator.free(pairs);
-
-        outer: for (pairs) |pair| {
-            var strong_type: ?BidiCategory.Value = null;
-            for (pair.opening.ri..(pair.closing.ri + 1)) |ri| {
-                const start = if (ri == pair.opening.ri) pair.opening.ii else seq.runs[ri].start;
-                const end = if (ri == pair.closing.ri) pair.closing.ii else seq.runs[ri].end;
-                for (start..end) |ii| {
-                    var cat = switch (cats[ii]) {
-                        .EN, .AN => .R,
-                        else => |cat| cat,
-                    };
-                    if (cat == dir) {
-                        seq.get(pair.opening).cat = dir;
-                        seq.get(pair.closing).cat = dir;
-                        checkNSMAfterPairedBracket(seq, pair.opening, chars, cats, dir);
-                        checkNSMAfterPairedBracket(seq, pair.closing, chars, cats, dir);
-                        continue :outer;
-                    }
-
-                    if (cat == .L or cat == .R) {
-                        strong_type = cat;
-                    }
-                }
-            }
-
-            if (strong_type == null) {
-                continue :outer;
-            }
-
-            var ri = pair.opening.ri + 1;
-            var ii = pair.opening.ii;
-            const context = ctx: while (ri > 0) : (ri -= 1) {
-                while (ii > seq.runs[ri - 1].start) : (ii -= 1) {
-                    switch (cats[ii - 1]) {
-                        .L, .R => |cat| break :ctx cat,
-                        .EN, .AN => break :ctx .R,
-                        else => {},
-                    }
-                }
-
-                if (ri - 1 > 0) {
-                    ii = seq.runs[ri - 2].end;
-                }
-            } else seq.sos;
-
-            const new_cat = if (context == strong_type.?) context else dir;
-            cats[pair.opening.ii] = new_cat;
-            cats[pair.closing.ii] = new_cat;
-            checkNSMAfterPairedBracket(seq, pair.opening, chars, cats, new_cat);
-            checkNSMAfterPairedBracket(seq, pair.closing, chars, cats, new_cat);
-        }
-
-        var prev_char: ?usize = null;
-        var ni_seq_ctx: ?BidiCategory.Value = null;
-        var ni_seq_start: ?Sequence.Pos = null;
-        for (seq.runs, 0..) |run, ri| {
-            for (run.start..run.end) |ii| {
-                const prev = prev_char;
-                prev_char = ii;
-                switch (cats[ii]) {
-                    .B, .S, .WS, .ON, .FSI, .LRI, .RLI, .PDI => {
-                        if (ni_seq_start) |*nss| {
-                            nss.* += 1;
-                            continue;
-                        }
-
-                        if (prev) |p| {
-                            switch (cats[p]) {
-                                .L, .R, .EN, .AN => {
-                                    ni_seq_ctx = p.cat;
-                                },
-                                .EN, .AN => {
-                                    ni_seq_ctx = .R;
-                                },
-                                else => {
-                                    cats[ii] = dir;
-                                    continue;
-                                },
-                            }
-                            ni_seq_start = Sequence.Pos{
-                                .ri = ri,
-                                .ii = ii,
-                            };
-                        }
-                    },
-                    .L, .R, .AN, .EN => {
-                        if (ni_seq_start) |start| {
-                            const context = if (cats[ii] == .AN or cats[ii] == .EN) .R else cats[ii];
-                            if (ni_seq_ctx.? == context) {
-                                setAllInSequence(seq, start, Sequence.Pos{ .ri = ri, .ii = ii }, cats, context);
-                            } else {
-                                setAllInSequence(seq, start, Sequence.Pos{ .ri = ri, .ii = ii }, cats, dir);
-                            }
-
-                            ni_seq_ctx = null;
-                            ni_seq_start = null;
-                        }
-                    },
-                    else => {
-                        if (ni_seq_start) |start| {
-                            setAllInSequence(seq, start, Sequence.Pos{ .ri = ri, .ii = ii }, cats, dir);
-                            ni_seq_ctx = null;
-                            ni_seq_start = null;
-                        }
-                    },
-                }
-            }
-        }
-    }
-}
-
-fn checkNSMAfterPairedBracket(
-    seq: Sequence,
-    pos: Sequence.Pos,
-    chars: []const u32,
-    cats: []BidiCategory.Value,
-    cat: BidiCategory.Value,
-) void {
-    var ri = pos.ri;
-    var ii = pos.ii + 1;
-    outer: while (ri < seq.runs.len) : (ri += 1) {
-        while (ii < seq.runs[ri].end) : (ii += 1) {
-            switch (try ucd.trieValue(BidiCategory, chars[ii])) {
-                .NSM => {
-                    cats[ii] = cat;
-                },
-                else => break :outer,
-            }
-        }
-    }
-}
-
-fn setAllInSequence(
-    seq: Sequence,
-    start: Sequence.Pos,
-    end: Sequence.Pos,
-    cats: []BidiCategory.Value,
-    cat: BidiCategory.Value,
-) void {
-    for (start.ri..(end.ri + 1)) |ri| {
-        const start_idx = if (ri == start.ri) start.ii else seq.runs[ri].start;
-        const end_idx = if (ri == end.ri) end.ii + 1 else seq.runs[ri].end;
-        for (start_idx..end_idx) |ii| {
-            cats[ii] = cat;
-        }
-    }
-}
-
-fn resolveBracketPairs(
-    allocator: std.mem.Allocator,
-    seq: Sequence,
-    chars: []const u32,
-    cats: []const BidiCategory.Value,
-) ![]const BracketPair {
-    var state: struct {
-        stack: [stack_size]StackEntry = undefined,
-        stack_len: usize = 0,
-        pairs: std.ArrayList(BracketPair),
-
-        const stack_size = 63;
-        const StackEntry = struct {
-            bracket: BidiBrackets.Bracket,
-            pos: Sequence.Pos,
-        };
-
-        fn append(self: *@This(), opening: Sequence.Pos, ri: usize, ii: usize) !void {
-            try self.pairs.append(BracketPair{
-                .opening = opening,
-                .closing = Sequence.Pos{
-                    .ri = ri,
-                    .ii = ii,
-                },
-            });
-        }
-
-        fn push(self: *@This(), bracket: BidiBrackets.Bracket, ri: usize, ii: usize) bool {
-            if (self.stack_len >= stack_size) {
-                return false;
-            }
-            self.stack[self.stack_len] = StackEntry{
-                .bracket = bracket,
-                .pos = Sequence.Pos{
-                    .ri = ri,
-                    .ii = ii,
-                },
-            };
-            self.stack_len += 1;
-        }
-
-        fn pop(self: *@This(), new_len: usize) void {
-            self.stack_len = new_len;
-        }
-    } = .{ .pairs = std.ArrayList(BracketPair).init(allocator) };
-
-    outer: for (seq.runs, 0..) |run, ri| {
-        for (run.start..run.end) |ii| {
-            // skip resolved characters
-            if (cats[ii] == .L or cats[ii] == .R) continue;
-
-            if (BidiBrackets.get(chars[ii])) |bracket| {
-                switch (bracket.type) {
-                    .opening => {
-                        if (!state.push(bracket, ri, ii)) {
-                            break :outer;
-                        }
-                    },
-                    .closing => {
-                        var i = state.stack_len;
-                        while (i > 0) : (i -= 1) {
-                            const entry = state.stack[i - 1];
-                            if (entry.bracket.pair == chars[ii]) {
-                                try state.append(entry.pos, ri, ii);
-                                state.pop(i - 1);
-                                break;
-                            }
-                        }
-                    },
-                }
-            }
-        }
-    }
-
-    var pairs = try state.pairs.toOwnedSlice();
-    std.mem.sort(
-        BracketPair,
-        pairs,
-        undefined,
-        struct {
-            fn lessThan(_: void, lhs: BracketPair, rhs: BracketPair) bool {
-                return lhs.opening.ii < rhs.opening.ii;
-            }
-        }.lessThan,
-    );
-    return pairs;
-}
-
-const BracketPair = struct {
-    opening: Sequence.Pos,
-    closing: Sequence.Pos,
-};
-
-fn resolveWeakTypes(cats: []BidiCategory.Value, sequences: []const Sequence) void {
-    const Prev = struct {
-        cat: BidiCategory.Value,
-        ii: usize,
-    };
-    for (sequences) |seq| {
-        var strong_type = seq.sos;
-        var prev: ?Prev = null;
-        var prev_prev: ?Prev = null;
-        var et_seq_start: ?Sequence.Pos = null;
-        for (seq.runs, 0..) |run, ri| {
-            for (run.start..run.end) |ii| {
-                const cat = cats[ii];
-                const old_prev = prev;
-                const old_prev_prev = prev_prev;
-                prev_prev = prev;
-                prev = Prev{
-                    .cat = cat,
-                    .ii = ii,
-                };
-                var reset_et_seq_start = true;
-                switch (cat) {
-                    .NSM => {
-                        cats[ii] = if (old_prev) |p|
-                            switch (p.cat) {
-                                .RLI, .LRI, .FSI, .PDI => .ON,
-                                else => p.cat,
-                            }
-                        else
-                            seq.sos;
-                    },
-                    .R, .L => {
-                        strong_type = cat;
-                    },
-                    .AL => {
-                        strong_type = .AL;
-                        cats[ii] = .R;
-                    },
-                    .EN => {
-                        if (strong_type == .AL) {
-                            cats[ii] = .AN;
-                            prev = .AN;
-                        } else {
-                            if (old_prev) |p| {
-                                if (p.cat == .CS or p.cat == .ES) {
-                                    if (old_prev_prev) |pp| {
-                                        if (pp.cat == .EN) {
-                                            cats[p.ii] = .EN;
-                                        }
-                                    }
-                                }
-                            } else if (et_seq_start) |ess| {
-                                for (ess.ri..(ri + 1)) |i| {
-                                    const start = if (i == ess.ri) ess.ii else seq.runs[i].start;
-                                    const end = if (i == ri) ii else seq.runs[i].end;
-                                    for (start..end) |ci| {
-                                        cats[ci] = .EN;
-                                    }
-                                }
-                            }
-
-                            if (strong_type == .L) {
-                                cats[ii] = .L;
-                            }
-                        }
-                    },
-                    .AN => {
-                        if (old_prev) |p| {
-                            if (p.cat == .CS) {
-                                if (old_prev_prev) |pp| {
-                                    if (pp.cat == .AN) {
-                                        cats[p.ii] = .AN;
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    .ET => {
-                        if (old_prev) |p| {
-                            if (p.cat == .EN) {
-                                cats[p.ii] = .EN;
-                                prev.?.cat = .EN;
-                            }
-                        } else {
-                            if (et_seq_start == null) {
-                                et_seq_start = .{ .ri = ri, .ii = ii };
-                            }
-                            cats[ii] = .ON;
-                            reset_et_seq_start = false;
-                        }
-                    },
-                    .ES, .CS => {
-                        cats[ii] = .ON;
-                    },
-                    else => {
-                        // do nothing
-                    },
-                }
-                if (reset_et_seq_start) {
-                    et_seq_start = null;
-                }
-            }
-        }
-    }
-}
-
-fn resolveSequences(
-    allocator: std.mem.Allocator,
-    levels: []const Level,
-    cats: []const BidiCategory.Value,
-    paragraph_level: Level,
-) ![]const Sequence {
-    const SequenceLevelRuns = std.ArrayList(LevelRun);
-
-    var seqs_runs = std.ArrayList(SequenceLevelRuns).init(allocator);
-    defer seqs_runs.deinit();
-
-    var stack = std.ArrayList(SequenceLevelRuns).init(allocator);
-    defer stack.deinit();
-
-    var iter = LevelRunIterator{ .levels = levels };
-    while (iter.next()) |run| {
-        const start_cat = cats[run.start];
-        const end_cat = cats[run.end - 1];
-
-        var seq = if (start_cat == .PDI and stack.len > 0)
-            stack.pop()
-        else
-            SequenceLevelRuns.init(allocator);
-
-        try seq.append(run);
-
-        switch (end_cat) {
-            .RLI, .LRI, .FSI => {
-                try stack.append(seq);
-            },
-            else => {
-                try seqs_runs.append(seq);
-            },
-        }
-    }
-
-    while (stack.popOrNull()) |seq| {
-        try seqs_runs.append(seq);
-    }
-
-    var seqs = std.ArrayList(Sequence).init(allocator);
-    for (seqs_runs.items) |seq_runs| {
-        const start_run = seq_runs.items[0];
-        const end_run = seq_runs.getLast();
-
-        var boundary_level = if (start_run.start > 0) levels[start_run.start - 1] else paragraph_level;
-        boundary_level = @max(levels[start_run.start], boundary_level);
-        const sos = if (boundary_level % 2 == 0) .L else .R;
-
-        boundary_level = if (end_run.end < levels.len and switch (cats[end_run.end]) {
-            .RLI, .LRI, .FSI => false,
-            else => true,
-        })
-            levels[end_run.end]
-        else
-            paragraph_level;
-        boundary_level = @max(levels[end_run.end - 1], boundary_level);
-        const eos = if (boundary_level % 2 == 0) .L else .R;
-
-        var runs = try std.ArrayList(LevelRun).initCapacity(allocator, seq_runs.items.len);
-        for (seq_runs.items) |run| {
-            try runs.append(run);
-        }
-
-        try seqs.append(Sequence{
-            .level = start_run.level,
-            .runs = try runs.toOwnedSlice(),
-            .sos = sos,
-            .eos = eos,
-        });
-    }
-
-    return try seqs.toOwnedSlice();
-}
-
-const Sequence = struct {
-    level: Level,
-    runs: []const LevelRun,
-    sos: BidiCategory.Value,
-    eos: BidiCategory.Value,
-
-    const Pos = struct {
-        ri: usize,
-        ii: usize,
-    };
-};
-
-const LevelRunIterator = struct {
-    levels: []const Level,
-    i: usize = 0,
-
-    fn next(self: *LevelRunIterator) ?LevelRun {
-        if (self.i >= self.levels.len) {
-            return null;
-        }
-
-        const start = self.i;
-        const level: u8 = self.levels[start];
-        self.i += 1;
-        for (self.levels[self.i..]) |lvl| {
-            self.i += 1;
-            if (lvl != level) {
-                break;
-            }
-        }
-
-        return LevelRun{
-            .level = level,
-            .start = start,
-            .end = self.i,
-        };
-    }
-};
-
-const LevelRun = struct {
-    level: Level,
-    start: usize,
-    end: usize,
-};
-
-fn resolveExplicit(
+fn resolveExplicitTypes(
     infos: []const CharInfo,
     levels: []Level,
-    cats: []BidiCategory.Value,
+    cats: []BidiCat,
     paragraph_level: Level,
 ) void {
-    const max_depth = 125;
     var state: struct {
         levels: []Level,
-        cats: []BidiCategory.Value,
+        cats: []BidiCat,
         stack: [stack_size]DirectionalStatus = undefined,
         stack_len: usize = 0,
         overflow_isolate: usize = 0,
         overflow_embedding: usize = 0,
         valid_isolate: usize = 0,
 
+        const max_depth = 125;
         const stack_size = max_depth + 2;
 
         const DirectionalStatus = struct {
             level: Level,
-            override: ?BidiCategory.Value,
+            override: ?BidiCat,
             isolate: bool,
         };
 
-        fn pushEmbedding(self: *@This(), level: Level, override: ?BidiCategory.Value) void {
+        fn pushEmbedding(self: *@This(), level: Level, override: ?BidiCat, i: usize) void {
             if (level <= max_depth and self.overflow_isolate == 0 and self.overflow_embedding == 0) {
                 self.push(.{
                     .level = level,
                     .override = override,
                     .isolate = false,
                 });
+                self.levels[i] = level;
             } else if (self.overflow_isolate == 0) {
                 self.overflow_embedding += 1;
             }
@@ -629,7 +215,7 @@ fn resolveExplicit(
                 self.valid_isolate += 1;
                 self.push(.{
                     .level = level,
-                    .override = .neutral,
+                    .override = null,
                     .isolate = true,
                 });
             } else {
@@ -637,13 +223,13 @@ fn resolveExplicit(
             }
         }
 
-        fn set(self: *@This(), i: usize, cat: BidiCategory.Value) void {
+        fn set(self: *@This(), i: usize, cat: BidiCat) void {
             const last = self.lastEntry();
             self.levels[i] = last.level;
             self.cats[i] = last.override orelse cat;
         }
 
-        fn push(self: *@This(), entry: DirectionalStatus) void {
+        inline fn push(self: *@This(), entry: DirectionalStatus) void {
             self.stack[self.stack_len] = entry;
             self.stack_len += 1;
         }
@@ -688,19 +274,19 @@ fn resolveExplicit(
     for (infos, 0..) |info, i| {
         switch (info.bidi) {
             .RLE => {
-                state.pushEmbedding(state.nextOddLevel(), null);
+                state.pushEmbedding(state.nextOddLevel(), null, i);
                 cats[i] = .RLE;
             },
             .LRE => {
-                state.pushEmbedding(state.nextEvenLevel(), null);
+                state.pushEmbedding(state.nextEvenLevel(), null, i);
                 cats[i] = .LRE;
             },
             .RLO => {
-                state.pushEmbedding(state.nextOddLevel(), .R);
+                state.pushEmbedding(state.nextOddLevel(), .R, i);
                 cats[i] = .RLO;
             },
             .LRO => {
-                state.pushEmbedding(state.nextEvenLevel(), .L);
+                state.pushEmbedding(state.nextEvenLevel(), .L, i);
                 cats[i] = .LRO;
             },
             .PDF => {
@@ -714,13 +300,14 @@ fn resolveExplicit(
                         _ = state.pop();
                     }
                 }
+                levels[i] = state.lastEntry().level;
                 cats[i] = .PDF;
             },
             .RLI => state.pushRLI(i),
             .LRI => state.pushLRI(i),
             .FSI => {
                 var isolate_count: usize = 0;
-                const level = for (infos[i..]) |next_info| {
+                for (infos[(i + 1)..]) |next_info| {
                     switch (next_info.bidi) {
                         .RLI, .LRI, .FSI => {
                             isolate_count += 1;
@@ -729,22 +316,22 @@ fn resolveExplicit(
                             if (isolate_count > 0) {
                                 isolate_count -= 1;
                             } else {
-                                break .LRI;
+                                state.pushLRI(i);
+                                break;
                             }
                         },
                         .L => if (isolate_count == 0) {
-                            break .LRI;
+                            state.pushLRI(i);
+                            break;
                         },
                         .R, .AL => if (isolate_count == 0) {
-                            break .RLI;
+                            state.pushRLI(i);
+                            break;
                         },
-                        else => continue,
+                        else => {},
                     }
-                } else .LRI;
-
-                switch (level) {
-                    .RLI => state.pushRLI(i),
-                    .LRI => state.pushLRI(i),
+                } else {
+                    state.pushLRI(i);
                 }
             },
             .PDI => {
@@ -771,8 +358,964 @@ fn resolveExplicit(
     }
 }
 
-const Paragraph = struct {
+fn resolveSequences(
+    allocator: std.mem.Allocator,
+    levels: []const Level,
+    cats: []const BidiCat,
+    paragraph_level: Level,
+) ![]const Sequence {
+    const SequenceLevelRuns = std.ArrayList(LevelRun);
+
+    var seqs_runs = std.ArrayList(SequenceLevelRuns).init(allocator);
+    defer {
+        for (seqs_runs.items) |slr| {
+            slr.deinit();
+        }
+        seqs_runs.deinit();
+    }
+
+    var stack = std.ArrayList(SequenceLevelRuns).init(allocator);
+    defer stack.deinit();
+
+    var iter = LevelRunIterator{ .levels = levels, .cats = cats };
+    while (iter.next()) |run| {
+        const start_cat = cats[run.start];
+        const end_cat = cats[run.end - 1];
+
+        var seq = if (start_cat == .PDI and stack.items.len > 0)
+            stack.pop()
+        else
+            SequenceLevelRuns.init(allocator);
+
+        try seq.append(run);
+
+        switch (end_cat) {
+            .RLI, .LRI, .FSI => {
+                try stack.append(seq);
+            },
+            else => {
+                try seqs_runs.append(seq);
+            },
+        }
+    }
+
+    while (stack.popOrNull()) |seq| {
+        try seqs_runs.append(seq);
+    }
+
+    var seqs = std.ArrayList(Sequence).init(allocator);
+    for (seqs_runs.items) |seq_runs| {
+        const seq_start = seq_runs.items[0].start;
+        const seq_end = seq_runs.getLast().end;
+
+        const sos_level = blk: {
+            var sos_level = paragraph_level;
+            if (seq_start != 0) {
+                var i = seq_start - 1;
+                while (i > 0) : (i -= 1) {
+                    if (ignoreCat(cats[i])) {
+                        continue;
+                    }
+
+                    sos_level = levels[i];
+                    break;
+                }
+            }
+
+            break :blk @max(sos_level, levels[seq_start]);
+        };
+        const sos: BidiCat = if (sos_level % 2 == 0) .L else .R;
+
+        const eos_level = blk: {
+            var eos_level: Level = paragraph_level;
+            switch (cats[seq_end - 1]) {
+                .RLI, .LRI, .FSI => {
+                    // if the sequence ends with an isolate initiator we compare with the paragraph level.
+                },
+                else => {
+                    // else compare with the next non-ignored character in the whole paragraph text.
+                    var i = seq_end;
+                    while (i < levels.len) : (i += 1) {
+                        if (ignoreCat(cats[i])) {
+                            continue;
+                        }
+
+                        eos_level = levels[i];
+                        break;
+                    }
+                },
+            }
+
+            break :blk @max(eos_level, levels[seq_end - 1]);
+        };
+        const eos: BidiCat = if (eos_level % 2 == 0) .L else .R;
+
+        var runs = try std.ArrayList(LevelRun).initCapacity(allocator, seq_runs.items.len);
+        for (seq_runs.items) |run| {
+            try runs.append(run);
+        }
+
+        try seqs.append(Sequence{
+            .level = seq_runs.items[0].level,
+            .runs = try runs.toOwnedSlice(),
+            .sos = sos,
+            .eos = eos,
+        });
+    }
+
+    return try seqs.toOwnedSlice();
+}
+
+fn freeSequences(allocator: std.mem.Allocator, sequences: []const Sequence) void {
+    for (sequences) |seq| {
+        allocator.free(seq.runs);
+    }
+    allocator.free(sequences);
+}
+
+fn resolveWeakTypes(infos: []const CharInfo, cats: []BidiCat, sequences: []const Sequence) void {
+    var state: struct {
+        infos: []const CharInfo,
+        cats: []BidiCat,
+        seq: Sequence,
+        strong_type: BidiCat,
+        et_seq_start: ?Sequence.Pos = null,
+
+        fn next(self: *@This(), cat: BidiCat, pos: Sequence.Pos) void {
+            var reset_et_seq_start = true;
+            switch (cat) {
+                .NSM => {
+                    var p_cat: ?BidiCat = null;
+                    var p_pos = pos;
+                    while (p_pos.prev(self.seq, self.cats)) |p| {
+                        const c = self.infos[p.ii].bidi;
+                        if (c != .NSM) {
+                            p_cat = c;
+                            break;
+                        }
+
+                        p_pos = p;
+                    }
+                    if (p_cat) |c| {
+                        switch (c) {
+                            .RLI, .LRI, .FSI, .PDI => {
+                                self.cats[pos.ii] = .ON;
+                            },
+                            else => {
+                                self.cats[pos.ii] = c;
+                                self.next(c, pos);
+                                // this will have been handled by the call above
+                                reset_et_seq_start = false;
+                            },
+                        }
+                    } else {
+                        self.cats[pos.ii] = self.seq.sos;
+                        self.strong_type = self.seq.sos;
+                    }
+                },
+                .R, .L => {
+                    self.strong_type = cat;
+                },
+                .AL => {
+                    self.strong_type = .AL;
+                    self.cats[pos.ii] = .R;
+                },
+                .EN => {
+                    if (self.strong_type == .AL) {
+                        self.cats[pos.ii] = .AN;
+                        self.checkCSBetweenAN(pos);
+                    } else {
+                        if (pos.prev(self.seq, self.cats)) |p| {
+                            const p_cat = self.infos[p.ii].bidi;
+                            if (p_cat == .CS or p_cat == .ES) {
+                                if (p.prev(self.seq, self.cats)) |pp| {
+                                    if (self.treatAsEn(pp, false)) {
+                                        self.cats[p.ii] = if (self.strong_type == .L) .L else .EN;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (self.et_seq_start) |ess| {
+                            for (ess.ri..(pos.ri + 1)) |ri| {
+                                const start = if (ri == ess.ri) ess.ii else self.seq.runs[ri].start;
+                                const end = if (ri == pos.ri) pos.ii else self.seq.runs[ri].end;
+                                for (start..end) |ci| {
+                                    if (ignoreCat(self.cats[ci])) {
+                                        continue;
+                                    }
+
+                                    self.cats[ci] = if (self.strong_type == .L) .L else .EN;
+                                }
+                            }
+                        }
+
+                        if (self.strong_type == .L) {
+                            self.cats[pos.ii] = .L;
+                        }
+                    }
+                },
+                .AN => {
+                    self.checkCSBetweenAN(pos);
+                },
+                .ET => {
+                    self.cats[pos.ii] = .ON;
+                    const p = pos.prev(self.seq, self.cats);
+                    if (p != null and self.treatAsEn(p.?, true)) {
+                        self.cats[pos.ii] = if (self.strong_type == .L) .L else .EN;
+                    } else {
+                        if (self.et_seq_start == null) {
+                            self.et_seq_start = pos;
+                        }
+                        reset_et_seq_start = false;
+                    }
+                },
+                .ES, .CS => {
+                    self.cats[pos.ii] = .ON;
+                },
+                else => {
+                    // do nothing
+                },
+            }
+            if (reset_et_seq_start) {
+                self.et_seq_start = null;
+            }
+        }
+
+        fn checkCSBetweenAN(self: @This(), pos: Sequence.Pos) void {
+            if (pos.prev(self.seq, self.cats)) |p| {
+                if (self.infos[p.ii].bidi == .CS) {
+                    if (p.prev(self.seq, self.cats)) |pp| {
+                        if (self.cats[pp.ii] == .AN) {
+                            self.cats[p.ii] = .AN;
+                        }
+                    }
+                }
+            }
+        }
+
+        fn treatAsEn(self: @This(), pos: Sequence.Pos, include_et: bool) bool {
+            return switch (self.cats[pos.ii]) {
+                .EN => if (!include_et) self.infos[pos.ii].bidi != .ET else true,
+                .L => switch (self.infos[pos.ii].bidi) {
+                    .EN, .ET => true,
+                    .NSM => if (pos.prev(self.seq, self.cats)) |p| self.infos[p.ii].bidi == .EN else false,
+                    else => false,
+                },
+                else => false,
+            };
+        }
+    } = undefined;
+
+    for (sequences) |seq| {
+        state = .{ .infos = infos, .cats = cats, .seq = seq, .strong_type = seq.sos };
+        for (seq.runs, 0..) |run, ri| {
+            for (run.start..run.end) |ii| {
+                const cat = cats[ii];
+                if (ignoreCat(cat)) {
+                    continue;
+                }
+
+                state.next(cat, Sequence.Pos{
+                    .ri = ri,
+                    .ii = ii,
+                });
+            }
+        }
+    }
+}
+
+fn resolveNeutralTypes(
+    allocator: std.mem.Allocator,
+    chars: []const u32,
+    infos: []const CharInfo,
+    cats: []BidiCat,
+    sequences: []const Sequence,
+) !void {
+    for (sequences) |seq| {
+        const e: BidiCat = if (seq.level % 2 == 0) .L else .R;
+
+        const pairs = try resolveBracketPairs(allocator, chars, cats, seq);
+        defer allocator.free(pairs);
+
+        outer: for (pairs) |pair| {
+            var strong_type: ?BidiCat = null;
+            for (pair.opening.ri..(pair.closing.ri + 1)) |ri| {
+                const start = if (ri == pair.opening.ri) pair.opening.ii else seq.runs[ri].start;
+                const end = if (ri == pair.closing.ri) pair.closing.ii else seq.runs[ri].end;
+                for (start..end) |ii| {
+                    var cat = cats[ii];
+                    if (ignoreCat(cat)) {
+                        continue;
+                    }
+
+                    if (cat == .EN or cat == .AN) {
+                        cat = .R;
+                    }
+
+                    if (cat == e) {
+                        cats[pair.opening.ii] = e;
+                        cats[pair.closing.ii] = e;
+                        checkNSMAfterPairedBracket(seq, pair.opening, infos, cats, e);
+                        checkNSMAfterPairedBracket(seq, pair.closing, infos, cats, e);
+                        continue :outer;
+                    }
+
+                    if (cat == .L or cat == .R) {
+                        strong_type = cat;
+                    }
+                }
+            }
+
+            if (strong_type == null) {
+                continue :outer;
+            }
+
+            var ri = pair.opening.ri + 1;
+            var ii = pair.opening.ii;
+            const context = ctx: while (ri > 0) : (ri -= 1) {
+                while (ii > seq.runs[ri - 1].start) : (ii -= 1) {
+                    switch (cats[ii - 1]) {
+                        .L, .R => |cat| break :ctx cat,
+                        .EN, .AN => break :ctx .R,
+                        else => {},
+                    }
+                }
+
+                if (ri - 1 > 0) {
+                    ii = seq.runs[ri - 2].end;
+                }
+            } else seq.sos;
+
+            const new_cat = if (context == strong_type.?) context else e;
+            cats[pair.opening.ii] = new_cat;
+            cats[pair.closing.ii] = new_cat;
+            checkNSMAfterPairedBracket(seq, pair.opening, infos, cats, new_cat);
+            checkNSMAfterPairedBracket(seq, pair.closing, infos, cats, new_cat);
+        }
+
+        var prev_char: ?usize = null;
+        var ni_seq_ctx: ?BidiCat = null;
+        var ni_seq_start: ?Sequence.Pos = null;
+        for (seq.runs, 0..) |run, ri| {
+            for (run.start..run.end) |ii| {
+                const cat = cats[ii];
+                if (ignoreCat(cat)) {
+                    continue;
+                }
+
+                const prev = prev_char;
+                prev_char = ii;
+
+                switch (cat) {
+                    .B, .S, .WS, .ON, .FSI, .LRI, .RLI, .PDI => {
+                        cats[ii] = e;
+                        if (ni_seq_start != null) {
+                            continue;
+                        }
+
+                        if (prev) |p| {
+                            switch (cats[p]) {
+                                .L, .R => {
+                                    ni_seq_ctx = cats[p];
+                                },
+                                .EN, .AN => {
+                                    ni_seq_ctx = .R;
+                                },
+                                else => {
+                                    continue;
+                                },
+                            }
+                        } else {
+                            ni_seq_ctx = seq.sos;
+                        }
+                        ni_seq_start = Sequence.Pos{
+                            .ri = ri,
+                            .ii = ii,
+                        };
+                    },
+                    .L, .R, .AN, .EN => {
+                        if (ni_seq_start) |start| {
+                            const context = if (cat == .AN or cat == .EN) .R else cat;
+                            if (ni_seq_ctx.? == context) {
+                                setAllInSequence(seq, start, Sequence.Pos{ .ri = ri, .ii = ii }, cats, context);
+                            }
+
+                            ni_seq_ctx = null;
+                            ni_seq_start = null;
+                        }
+                    },
+                    else => {
+                        ni_seq_ctx = null;
+                        ni_seq_start = null;
+                    },
+                }
+            }
+        }
+
+        if (ni_seq_start) |start| {
+            if (ni_seq_ctx.? == seq.eos) {
+                const end_ri = seq.runs.len - 1;
+                const end_ii = seq.runs[end_ri].end;
+                setAllInSequence(seq, start, Sequence.Pos{ .ri = end_ri, .ii = end_ii }, cats, seq.eos);
+            }
+        }
+    }
+}
+
+fn checkNSMAfterPairedBracket(
+    seq: Sequence,
+    pos: Sequence.Pos,
+    infos: []const CharInfo,
+    cats: []BidiCat,
+    cat: BidiCat,
+) void {
+    var ri = pos.ri;
+    var ii = pos.ii + 1;
+    outer: while (ri < seq.runs.len) : (ri += 1) {
+        while (ii < seq.runs[ri].end) : (ii += 1) {
+            const c = infos[ii].bidi;
+            if (ignoreCat(c)) {
+                continue;
+            }
+
+            switch (c) {
+                .NSM => {
+                    cats[ii] = cat;
+                },
+                else => break :outer,
+            }
+        }
+    }
+}
+
+fn setAllInSequence(
+    seq: Sequence,
+    start: Sequence.Pos,
+    end: Sequence.Pos,
+    cats: []BidiCat,
+    cat: BidiCat,
+) void {
+    for (start.ri..(end.ri + 1)) |ri| {
+        const start_idx = if (ri == start.ri) start.ii else seq.runs[ri].start;
+        const end_idx = if (ri == end.ri) end.ii else seq.runs[ri].end;
+        for (start_idx..end_idx) |ii| {
+            if (ignoreCat(cats[ii])) {
+                continue;
+            }
+            cats[ii] = cat;
+        }
+    }
+}
+
+fn resolveBracketPairs(
+    allocator: std.mem.Allocator,
+    chars: []const u32,
+    cats: []const BidiCat,
+    seq: Sequence,
+) ![]const BracketPair {
+    var state: struct {
+        stack: [stack_size]StackEntry = undefined,
+        stack_len: usize = 0,
+        pairs: std.ArrayList(BracketPair),
+
+        const stack_size = 63;
+        const StackEntry = struct {
+            bracket: BidiBrackets.Bracket,
+            pos: Sequence.Pos,
+        };
+
+        fn append(self: *@This(), opening: Sequence.Pos, ri: usize, ii: usize) !void {
+            try self.pairs.append(BracketPair{
+                .opening = opening,
+                .closing = Sequence.Pos{
+                    .ri = ri,
+                    .ii = ii,
+                },
+            });
+        }
+
+        fn push(self: *@This(), bracket: BidiBrackets.Bracket, ri: usize, ii: usize) bool {
+            if (self.stack_len >= stack_size) {
+                return false;
+            }
+            self.stack[self.stack_len] = StackEntry{
+                .bracket = bracket,
+                .pos = Sequence.Pos{
+                    .ri = ri,
+                    .ii = ii,
+                },
+            };
+            self.stack_len += 1;
+            return true;
+        }
+
+        fn pop(self: *@This(), new_len: usize) void {
+            self.stack_len = new_len;
+        }
+    } = .{ .pairs = std.ArrayList(BracketPair).init(allocator) };
+
+    outer: for (seq.runs, 0..) |run, ri| {
+        for (run.start..run.end) |ii| {
+            const cat = cats[ii];
+            if (ignoreCat(cat)) {
+                continue;
+            }
+
+            // skip resolved characters
+            if (cat == .L or cat == .R) {
+                continue;
+            }
+
+            if (BidiBrackets.get(chars[ii])) |bracket| {
+                switch (bracket.type) {
+                    .opening => {
+                        if (!state.push(bracket, ri, ii)) {
+                            break :outer;
+                        }
+                    },
+                    .closing => {
+                        var i = state.stack_len;
+                        while (i > 0) : (i -= 1) {
+                            const entry = state.stack[i - 1];
+                            if (entry.bracket.pair == chars[ii]) {
+                                try state.append(entry.pos, ri, ii);
+                                state.pop(i - 1);
+                                break;
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+
+    var pairs = try state.pairs.toOwnedSlice();
+    std.mem.sort(
+        BracketPair,
+        pairs,
+        @as(void, undefined),
+        struct {
+            fn lessThan(_: void, lhs: BracketPair, rhs: BracketPair) bool {
+                return lhs.opening.ii < rhs.opening.ii;
+            }
+        }.lessThan,
+    );
+    return pairs;
+}
+
+const BracketPair = struct {
+    opening: Sequence.Pos,
+    closing: Sequence.Pos,
+};
+
+fn resolveImplicitLevels(levels: []Level, cats: []const BidiCat, sequences: []const Sequence) void {
+    for (sequences) |seq| {
+        for (seq.runs) |run| {
+            for (run.start..run.end) |ii| {
+                if (seq.level % 2 == 0) {
+                    switch (cats[ii]) {
+                        .R => {
+                            levels[ii] += 1;
+                        },
+                        .AN, .EN => {
+                            levels[ii] += 2;
+                        },
+                        else => {},
+                    }
+                } else {
+                    switch (cats[ii]) {
+                        .L, .EN, .AN => {
+                            levels[ii] += 1;
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+    }
+}
+
+const Sequence = struct {
+    level: Level,
+    runs: []const LevelRun,
+    sos: BidiCat,
+    eos: BidiCat,
+
+    const Pos = struct {
+        ri: usize,
+        ii: usize,
+
+        fn prev(self: Pos, seq: Sequence, cats: []const BidiCat) ?Pos {
+            var pos = self;
+            while (pos.nextPrev(seq)) |p| {
+                if (ignoreCat(cats[p.ii])) {
+                    pos = p;
+                    continue;
+                }
+
+                return p;
+            }
+            return null;
+        }
+
+        fn nextPrev(self: Pos, seq: Sequence) ?Pos {
+            if (self.ii > seq.runs[self.ri].start) {
+                return Pos{
+                    .ri = self.ri,
+                    .ii = self.ii - 1,
+                };
+            }
+
+            if (self.ri > 0) {
+                const new_ri = self.ri - 1;
+                return Pos{
+                    .ri = new_ri,
+                    .ii = seq.runs[new_ri].end - 1,
+                };
+            }
+
+            return null;
+        }
+    };
+};
+
+const LevelRunIterator = struct {
+    levels: []const Level,
+    cats: []const BidiCat,
+    i: usize = 0,
+
+    fn next(self: *LevelRunIterator) ?LevelRun {
+        if (self.i >= self.levels.len) {
+            return null;
+        }
+
+        var start = self.i;
+        for (self.i..self.levels.len) |i| {
+            if (ignoreCat(self.cats[i])) {
+                start += 1;
+            } else {
+                break;
+            }
+        }
+
+        if (start >= self.levels.len) {
+            return null;
+        }
+
+        const level: u8 = self.levels[start];
+        var end = start + 1;
+        for (start..self.levels.len) |i| {
+            if (ignoreCat(self.cats[i])) {
+                continue;
+            }
+
+            if (self.levels[i] != level) {
+                break;
+            }
+
+            end = i + 1;
+        }
+
+        self.i = end;
+
+        return LevelRun{
+            .level = level,
+            .start = start,
+            .end = end,
+        };
+    }
+};
+
+const LevelRun = struct {
+    level: Level,
     start: usize,
     end: usize,
-    level: Level,
 };
+
+inline fn ignoreCat(cat: BidiCat) bool {
+    return switch (cat) {
+        .RLE, .LRE, .RLO, .LRO, .PDF, .BN => true,
+        else => false,
+    };
+}
+
+const BidiCat = BidiCategory.Value;
+
+test {
+    const test_data = @embedFile("ucd/BidiTest.txt");
+    const allocator = std.testing.allocator;
+
+    var debug: struct {
+        levels: []const ?Level = undefined,
+        reorder: []const usize = undefined,
+        infos: []const CharInfo = undefined,
+        line: usize = 1,
+
+        fn print(self: @This()) void {
+            debugPrintItems("Expected levels", self.levels);
+            debugPrintItems("Expected reorder", self.reorder);
+            debugPrintCats("Original cats", self.infos);
+            std.debug.print("Line: {}\n", .{self.line});
+        }
+    } = .{};
+
+    var levels = std.ArrayList(?Level).init(allocator);
+    defer levels.deinit();
+
+    var reordered = std.ArrayList(usize).init(allocator);
+    defer reordered.deinit();
+
+    var chars = std.ArrayList(u32).init(allocator);
+    defer chars.deinit();
+
+    var infos = std.ArrayList(CharInfo).init(allocator);
+    defer infos.deinit();
+
+    var lines = std.mem.splitScalar(u8, test_data, '\n');
+    while (lines.next()) |line| : (debug.line += 1) {
+        if (line.len == 0 or line[0] == '#') {
+            continue;
+        }
+
+        if (line[0] == '@') {
+            var info_split = std.mem.splitScalar(u8, line[1..], ':');
+            const info_type = info_split.next().?;
+            const info = std.mem.trim(u8, info_split.next().?, " \t");
+            if (std.mem.eql(u8, info_type, "Levels")) {
+                levels.clearRetainingCapacity();
+                var levels_iter = std.mem.splitScalar(u8, info, ' ');
+                while (levels_iter.next()) |level| {
+                    if (level[0] == 'x') {
+                        try levels.append(null);
+                    } else {
+                        try levels.append(try std.fmt.parseInt(u8, level, 10));
+                    }
+                }
+
+                debug.levels = levels.items;
+            } else if (std.mem.eql(u8, info_type, "Reorder")) {
+                reordered.clearRetainingCapacity();
+                var reordered_iter = std.mem.splitScalar(u8, info, ' ');
+                while (reordered_iter.next()) |index| {
+                    if (index.len == 0) {
+                        continue;
+                    }
+                    try reordered.append(try std.fmt.parseInt(Level, index, 10));
+                }
+
+                debug.reorder = reordered.items;
+            } else {
+                return error.UnexpectedBidiTestInfoType;
+            }
+            continue;
+        }
+
+        //if (debug.line != 497341) {
+        //    continue;
+        //}
+
+        var data_split = std.mem.splitScalar(u8, line, ';');
+        const cats_data = std.mem.trim(u8, data_split.next().?, " \t");
+        const paragraphs_data = std.mem.trim(u8, data_split.next().?, " \t");
+
+        chars.clearRetainingCapacity();
+        infos.clearRetainingCapacity();
+        var cats = std.mem.splitScalar(u8, cats_data, ' ');
+        while (cats.next()) |cat| {
+            const char = catStrToChar(cat);
+            try chars.append(char);
+            try infos.append(CharInfo.init(char));
+        }
+
+        debug.infos = infos.items;
+
+        const auto: u8 = 1;
+        const ltr: u8 = 2;
+        const rtl: u8 = 4;
+        const paragraphs = try std.fmt.parseInt(u8, paragraphs_data, 10);
+        if (paragraphs & auto != 0) {
+            expectLevelsAndReorder(
+                findParagraphLevel(infos.items),
+                chars.items,
+                infos.items,
+                levels.items,
+                reordered.items,
+            ) catch |e| {
+                debug.print();
+                return e;
+            };
+        }
+        if (paragraphs & ltr != 0) {
+            expectLevelsAndReorder(
+                0,
+                chars.items,
+                infos.items,
+                levels.items,
+                reordered.items,
+            ) catch |e| {
+                debug.print();
+                return e;
+            };
+        }
+        if (paragraphs & rtl != 0) {
+            expectLevelsAndReorder(
+                1,
+                chars.items,
+                infos.items,
+                levels.items,
+                reordered.items,
+            ) catch |e| {
+                debug.print();
+                return e;
+            };
+        }
+    }
+}
+
+fn catStrToChar(cat: []const u8) u32 {
+    return if (std.mem.eql(u8, cat, "AL"))
+        '\u{060B}'
+    else if (std.mem.eql(u8, cat, "AN"))
+        '\u{0605}'
+    else if (std.mem.eql(u8, cat, "B"))
+        '\u{000A}'
+    else if (std.mem.eql(u8, cat, "BN"))
+        '\u{2060}'
+    else if (std.mem.eql(u8, cat, "CS"))
+        '\u{2044}'
+    else if (std.mem.eql(u8, cat, "EN"))
+        '\u{06F9}'
+    else if (std.mem.eql(u8, cat, "ES"))
+        '\u{208B}'
+    else if (std.mem.eql(u8, cat, "ET"))
+        '\u{20CF}'
+    else if (std.mem.eql(u8, cat, "FSI"))
+        '\u{2068}'
+    else if (std.mem.eql(u8, cat, "L"))
+        '\u{02B8}'
+    else if (std.mem.eql(u8, cat, "LRE"))
+        '\u{202A}'
+    else if (std.mem.eql(u8, cat, "LRI"))
+        '\u{2066}'
+    else if (std.mem.eql(u8, cat, "LRO"))
+        '\u{202D}'
+    else if (std.mem.eql(u8, cat, "NSM"))
+        '\u{0300}'
+    else if (std.mem.eql(u8, cat, "ON"))
+        '\u{03F6}'
+    else if (std.mem.eql(u8, cat, "PDF"))
+        '\u{202C}'
+    else if (std.mem.eql(u8, cat, "PDI"))
+        '\u{2069}'
+    else if (std.mem.eql(u8, cat, "R"))
+        '\u{0590}'
+    else if (std.mem.eql(u8, cat, "RLE"))
+        '\u{202B}'
+    else if (std.mem.eql(u8, cat, "RLI"))
+        '\u{2067}'
+    else if (std.mem.eql(u8, cat, "RLO"))
+        '\u{202E}'
+    else if (std.mem.eql(u8, cat, "S"))
+        '\u{001F}'
+    else if (std.mem.eql(u8, cat, "WS"))
+        '\u{200A}'
+    else
+        @panic("invalid cat str");
+}
+
+fn findParagraphLevel(infos: []const CharInfo) Level {
+    var isolate_count: usize = 0;
+    for (infos) |info| {
+        switch (info.bidi) {
+            .B => {
+                break;
+            },
+            .LRI, .RLI, .FSI => {
+                isolate_count += 1;
+            },
+            .PDI => if (isolate_count > 0) {
+                isolate_count -= 1;
+            },
+            .L => if (isolate_count == 0) {
+                return 0;
+            },
+            .R, .AL => if (isolate_count == 0) {
+                return 1;
+            },
+            else => {},
+        }
+    }
+
+    return 0;
+}
+
+fn expectLevelsAndReorder(
+    paragraph_level: Level,
+    chars: []const u32,
+    infos: []const CharInfo,
+    expected_levels: []const ?Level,
+    expected_reordered: []const usize,
+) !void {
+    const actual_levels = resolve(std.testing.allocator, chars, infos, paragraph_level) catch |e| {
+        std.debug.print("\nFAILED BIDI RESOLVE\n", .{});
+        return e;
+    };
+    defer std.testing.allocator.free(actual_levels);
+    std.testing.expectEqual(expected_levels.len, actual_levels.len) catch |e| {
+        std.debug.print("\nFAILED BIDI LEVELS LEN\n", .{});
+        return e;
+    };
+
+    const actual_reordered = reorder(std.testing.allocator, infos, actual_levels, paragraph_level) catch |e| {
+        std.debug.print("\nFAILED BIDI REORDER\n", .{});
+        return e;
+    };
+    defer std.testing.allocator.free(actual_reordered);
+
+    for (0..actual_levels.len) |i| {
+        const expected = expected_levels[i];
+        const actual = actual_levels[i];
+        if (expected) |exp| {
+            std.testing.expectEqual(exp, actual) catch |e| {
+                std.debug.print("\nFAILED BIDI LEVEL CASE\n", .{});
+                return e;
+            };
+        }
+    }
+
+    for (expected_reordered, 0..) |expected, i| {
+        const actual = actual_reordered[i];
+        std.testing.expectEqual(expected, actual) catch |e| {
+            std.debug.print("\nFAILED BIDI REORDER CASE\n", .{});
+            return e;
+        };
+    }
+}
+
+fn debugPrintItems(context: []const u8, items: anytype) void {
+    std.debug.print("{s}: .{{", .{context});
+    for (items, 0..) |item, i| {
+        if (i > 0) {
+            std.debug.print(", ", .{});
+        }
+        if (@typeInfo(@TypeOf(item)) == .Optional) {
+            std.debug.print("{}({?})", .{ i, item });
+        } else {
+            std.debug.print("{}({})", .{ i, item });
+        }
+    }
+    std.debug.print("}}, \n", .{});
+}
+
+fn debugPrintCats(context: []const u8, items: anytype) void {
+    std.debug.print("{s}: .{{ ", .{context});
+    for (items, 0..) |item, i| {
+        if (i > 0) {
+            std.debug.print(", ", .{});
+        }
+        const cat = if (@TypeOf(item) == BidiCat) item else item.bidi;
+        std.debug.print("{}({s})", .{ i, @tagName(cat) });
+    }
+    std.debug.print("}}, \n", .{});
+}
