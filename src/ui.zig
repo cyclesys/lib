@@ -22,6 +22,7 @@ pub const initNode = tree.initNode;
 pub const render = tree.render;
 
 test {
+    _ = @import("ui/text/bidi.zig");
     _ = @import("ui/text/GraphemeBreak.zig");
     _ = @import("ui/text/LineBreak.zig");
     _ = @import("ui/text/WordBreak.zig");

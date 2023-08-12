@@ -3,9 +3,11 @@ const std = @import("std");
 allocator: std.mem.Allocator,
 gen_cat: Categories,
 bidi_cat: Categories,
+mappings: Mappings,
 entries: Entries,
 
 pub const Categories = std.StringArrayHashMap(void);
+pub const Mappings = std.AutoHashMap(u32, u32);
 pub const Entries = std.ArrayList(Entry);
 pub const Entry = struct {
     start: u32,
@@ -23,6 +25,7 @@ pub fn read(
         .allocator = allocator,
         .gen_cat = Categories.init(allocator),
         .bidi_cat = Categories.init(allocator),
+        .mappings = Mappings.init(allocator),
         .entries = Entries.init(allocator),
     };
 
@@ -57,10 +60,16 @@ pub fn read(
                 .bidi_cat = try categoryKey(self.allocator, &self.bidi_cat, bidi_cat),
             });
         } else {
-            const cp = code_point;
+            if (items.next()) |mapping| {
+                if (mapping.len != 0 and std.mem.indexOf(u8, mapping, " ") == null) {
+                    const mapping_cp = try std.fmt.parseInt(u32, mapping, 16);
+                    try self.mappings.put(code_point, mapping_cp);
+                    try self.mappings.put(mapping_cp, code_point);
+                }
+            }
             try self.entries.append(Entry{
-                .start = cp,
-                .end = cp,
+                .start = code_point,
+                .end = code_point,
                 .gen_cat = try categoryKey(self.allocator, &self.gen_cat, gen_cat),
                 .bidi_cat = try categoryKey(self.allocator, &self.bidi_cat, bidi_cat),
             });
@@ -80,6 +89,7 @@ fn categoryKey(allocator: std.mem.Allocator, cats: *Categories, cat: []const u8)
 
 pub fn deinit(self: *Self) void {
     self.entries.deinit();
+    self.mappings.deinit();
 
     for (self.gen_cat.keys()) |str| {
         self.allocator.free(str);

@@ -20,15 +20,16 @@ pub fn main() !void {
     defer ctx.deinit();
 
     {
-        const cached_file_path = try cachedFilePath(ctx, "UnicodeData.txt");
-        defer ctx.allocator.free(cached_file_path);
-        var data = try UnicodeData.read(ctx.allocator, cached_file_path);
+        const file_path = try cachedFilePath(ctx, "UnicodeData.txt");
+        defer ctx.allocator.free(file_path);
+        var data = try UnicodeData.read(ctx.allocator, file_path);
         defer data.deinit();
-        try genCategoryTrie(ctx, &data, "gen_cat", "GeneralCategory.zig");
-        try genCategoryTrie(ctx, &data, "bidi_cat", "BidiCategory.zig");
+
+        try genCategoryTrie(ctx, data, "gen_cat", "GeneralCategory.zig");
+        try genCategoryTrie(ctx, data, "bidi_cat", "BidiCategory.zig");
+        try genBidiBrackets(ctx, data);
     }
 
-    try genBidiBrackets(ctx);
     {
         var derived_bidi_extra = Property.init(allocator);
         defer derived_bidi_extra.deinit();
@@ -133,13 +134,8 @@ pub fn main() !void {
         try genPropertyTrie(ctx, "extracted/DerivedBidiClass.txt", "DerivedBidi.zig", &derived_bidi_extra);
     }
 
-    {
-        const cache_root = try std.fs.path.join(allocator, &.{ lib_root, "src", "ui", "text", "ucd" });
-        defer allocator.free(cache_root);
-
-        const file_path = try util.ensureCachedFile(allocator, cache_root, "BidiTest.txt", comptime ucdUrl("BidiTest.txt"));
-        allocator.free(file_path);
-    }
+    try genUcdFile(ctx, "BidiTest.txt");
+    try genUcdFile(ctx, "BidiCharacterTest.txt");
 
     {
         var emoji_property = try loadProperty(ctx, "emoji/emoji-data.txt", &.{"Extended_Pictographic"});
@@ -215,9 +211,14 @@ const Context = struct {
     }
 };
 
+fn genUcdFile(ctx: Context, comptime ucd_name: []const u8) !void {
+    const file_path = try util.ensureCachedFile(ctx.allocator, ctx.code_root, ucd_name, comptime ucdUrl(ucd_name));
+    ctx.allocator.free(file_path);
+}
+
 fn genCategoryTrie(
     ctx: Context,
-    data: *const UnicodeData,
+    data: UnicodeData,
     comptime category: []const u8,
     comptime code_file_name: []const u8,
 ) !void {
@@ -246,7 +247,7 @@ fn genCategoryTrie(
     try genCodeFile(ctx, code_file_name, buf.items);
 }
 
-fn genBidiBrackets(ctx: Context) !void {
+fn genBidiBrackets(ctx: Context, data: UnicodeData) !void {
     const cached_file_path = try cachedFilePath(ctx, "BidiBrackets.txt");
     defer ctx.allocator.free(cached_file_path);
 
@@ -260,6 +261,7 @@ fn genBidiBrackets(ctx: Context) !void {
         \\pub const Bracket = struct {
         \\    pair: u32,
         \\    type: BracketType,
+        \\    mapping: ?u32,
         \\};
         \\pub const BracketType = enum {
         \\    opening,
@@ -285,6 +287,15 @@ fn genBidiBrackets(ctx: Context) !void {
             .opening => try buf.appendSlice(".opening,\n"),
             .closing => try buf.appendSlice(".closing,\n"),
         }
+        try buf.appendSlice("            .mapping = ");
+        if (data.mappings.get(entry.left)) |mapping| {
+            try buf.append('\'');
+            try writeUnicodeCodePoint(&buf, mapping);
+            try buf.append('\'');
+        } else {
+            try buf.appendSlice("null");
+        }
+        try buf.appendSlice(",\n");
         try buf.appendSlice("        },\n");
     }
     try buf.appendSlice(

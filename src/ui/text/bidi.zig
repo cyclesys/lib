@@ -157,7 +157,6 @@ pub fn resolve(
 
     resolveWeakTypes(infos, cats, sequences);
     try resolveNeutralTypes(allocator, chars, infos, cats, sequences);
-
     resolveImplicitLevels(levels, cats, sequences);
 
     return levels;
@@ -668,7 +667,7 @@ fn resolveNeutralTypes(
             }
 
             if (strong_type == null) {
-                continue :outer;
+                continue;
             }
 
             var ri = pair.opening.ri + 1;
@@ -862,8 +861,8 @@ fn resolveBracketPairs(
                 continue;
             }
 
-            // skip resolved characters
-            if (cat == .L or cat == .R) {
+            // only .ON characters can be a paired bracket
+            if (cat != .ON) {
                 continue;
             }
 
@@ -878,7 +877,17 @@ fn resolveBracketPairs(
                         var i = state.stack_len;
                         while (i > 0) : (i -= 1) {
                             const entry = state.stack[i - 1];
-                            if (entry.bracket.pair == chars[ii]) {
+
+                            var matches = entry.bracket.pair == chars[ii];
+                            if (!matches) {
+                                if (entry.bracket.mapping) |mapping| {
+                                    if (BidiBrackets.get(mapping)) |mb| {
+                                        matches = mb.pair == chars[ii];
+                                    }
+                                }
+                            }
+
+                            if (matches) {
                                 try state.append(entry.pos, ri, ii);
                                 state.pop(i - 1);
                                 break;
@@ -1042,29 +1051,17 @@ inline fn ignoreCat(cat: BidiCat) bool {
 
 const BidiCat = BidiCategory.Value;
 
-test {
+test "BidiTest" {
     const test_data = @embedFile("ucd/BidiTest.txt");
     const allocator = std.testing.allocator;
 
-    var debug: struct {
-        levels: []const ?Level = undefined,
-        reorder: []const usize = undefined,
-        infos: []const CharInfo = undefined,
-        line: usize = 1,
-
-        fn print(self: @This()) void {
-            debugPrintItems("Expected levels", self.levels);
-            debugPrintItems("Expected reorder", self.reorder);
-            debugPrintCats("Original cats", self.infos);
-            std.debug.print("Line: {}\n", .{self.line});
-        }
-    } = .{};
+    var debug = DebugPrint{};
 
     var levels = std.ArrayList(?Level).init(allocator);
     defer levels.deinit();
 
-    var reordered = std.ArrayList(usize).init(allocator);
-    defer reordered.deinit();
+    var order = std.ArrayList(usize).init(allocator);
+    defer order.deinit();
 
     var chars = std.ArrayList(u32).init(allocator);
     defer chars.deinit();
@@ -1095,25 +1092,21 @@ test {
 
                 debug.levels = levels.items;
             } else if (std.mem.eql(u8, info_type, "Reorder")) {
-                reordered.clearRetainingCapacity();
+                order.clearRetainingCapacity();
                 var reordered_iter = std.mem.splitScalar(u8, info, ' ');
                 while (reordered_iter.next()) |index| {
                     if (index.len == 0) {
                         continue;
                     }
-                    try reordered.append(try std.fmt.parseInt(Level, index, 10));
+                    try order.append(try std.fmt.parseInt(Level, index, 10));
                 }
 
-                debug.reorder = reordered.items;
+                debug.order = order.items;
             } else {
                 return error.UnexpectedBidiTestInfoType;
             }
             continue;
         }
-
-        //if (debug.line != 497341) {
-        //    continue;
-        //}
 
         var data_split = std.mem.splitScalar(u8, line, ';');
         const cats_data = std.mem.trim(u8, data_split.next().?, " \t");
@@ -1140,7 +1133,7 @@ test {
                 chars.items,
                 infos.items,
                 levels.items,
-                reordered.items,
+                order.items,
             ) catch |e| {
                 debug.print();
                 return e;
@@ -1152,7 +1145,7 @@ test {
                 chars.items,
                 infos.items,
                 levels.items,
-                reordered.items,
+                order.items,
             ) catch |e| {
                 debug.print();
                 return e;
@@ -1164,7 +1157,7 @@ test {
                 chars.items,
                 infos.items,
                 levels.items,
-                reordered.items,
+                order.items,
             ) catch |e| {
                 debug.print();
                 return e;
@@ -1250,12 +1243,92 @@ fn findParagraphLevel(infos: []const CharInfo) Level {
     return 0;
 }
 
+test "BidiCharacterTest" {
+    const test_data = @embedFile("ucd/BidiCharacterTest.txt");
+    const allocator = std.testing.allocator;
+
+    var debug = DebugPrint{};
+
+    var chars = std.ArrayList(u32).init(allocator);
+    defer chars.deinit();
+
+    var infos = std.ArrayList(CharInfo).init(allocator);
+    defer infos.deinit();
+
+    var levels = std.ArrayList(?Level).init(allocator);
+    defer levels.deinit();
+
+    var order = std.ArrayList(usize).init(allocator);
+    defer order.deinit();
+
+    var lines = std.mem.splitScalar(u8, test_data, '\n');
+    while (lines.next()) |line| : (debug.line += 1) {
+        if (line.len == 0 or line[0] == '#') {
+            continue;
+        }
+
+        var data_split = std.mem.splitScalar(u8, std.mem.trim(u8, line, " \t"), ';');
+
+        const char_data = data_split.next().?;
+        _ = data_split.next().?;
+        const paragraph_level_data = data_split.next().?;
+        const levels_data = data_split.next().?;
+        const order_data = data_split.next().?;
+
+        var chars_iter = std.mem.splitScalar(u8, char_data, ' ');
+        while (chars_iter.next()) |char_str| {
+            const char = try std.fmt.parseInt(u32, char_str, 16);
+            try chars.append(char);
+            try infos.append(CharInfo.init(char));
+        }
+
+        const paragraph_level = try std.fmt.parseInt(Level, paragraph_level_data, 10);
+
+        var levels_iter = std.mem.splitScalar(u8, levels_data, ' ');
+        while (levels_iter.next()) |level| {
+            if (level[0] == 'x') {
+                try levels.append(null);
+            } else {
+                try levels.append(try std.fmt.parseInt(Level, level, 10));
+            }
+        }
+
+        var order_iter = std.mem.splitScalar(u8, order_data, ' ');
+        while (order_iter.next()) |idx| {
+            if (idx.len == 0) {
+                continue;
+            }
+            try order.append(try std.fmt.parseInt(usize, idx, 10));
+        }
+
+        debug.infos = infos.items;
+        debug.levels = levels.items;
+        debug.order = order.items;
+
+        expectLevelsAndReorder(
+            paragraph_level,
+            chars.items,
+            infos.items,
+            levels.items,
+            order.items,
+        ) catch |e| {
+            debug.print();
+            return e;
+        };
+
+        chars.clearRetainingCapacity();
+        infos.clearRetainingCapacity();
+        levels.clearRetainingCapacity();
+        order.clearRetainingCapacity();
+    }
+}
+
 fn expectLevelsAndReorder(
     paragraph_level: Level,
     chars: []const u32,
     infos: []const CharInfo,
     expected_levels: []const ?Level,
-    expected_reordered: []const usize,
+    expected_order: []const usize,
 ) !void {
     const actual_levels = resolve(std.testing.allocator, chars, infos, paragraph_level) catch |e| {
         std.debug.print("\nFAILED BIDI RESOLVE\n", .{});
@@ -1267,11 +1340,11 @@ fn expectLevelsAndReorder(
         return e;
     };
 
-    const actual_reordered = reorder(std.testing.allocator, infos, actual_levels, paragraph_level) catch |e| {
+    const actual_order = reorder(std.testing.allocator, infos, actual_levels, paragraph_level) catch |e| {
         std.debug.print("\nFAILED BIDI REORDER\n", .{});
         return e;
     };
-    defer std.testing.allocator.free(actual_reordered);
+    defer std.testing.allocator.free(actual_order);
 
     for (0..actual_levels.len) |i| {
         const expected = expected_levels[i];
@@ -1284,14 +1357,28 @@ fn expectLevelsAndReorder(
         }
     }
 
-    for (expected_reordered, 0..) |expected, i| {
-        const actual = actual_reordered[i];
+    for (expected_order, 0..) |expected, i| {
+        const actual = actual_order[i];
         std.testing.expectEqual(expected, actual) catch |e| {
-            std.debug.print("\nFAILED BIDI REORDER CASE\n", .{});
+            std.debug.print("\nFAILED BIDI ORDER CASE\n", .{});
             return e;
         };
     }
 }
+
+const DebugPrint = struct {
+    levels: []const ?Level = undefined,
+    order: []const usize = undefined,
+    infos: []const CharInfo = undefined,
+    line: usize = 1,
+
+    fn print(self: @This()) void {
+        debugPrintItems("Expected levels", self.levels);
+        debugPrintItems("Expected order", self.order);
+        debugPrintCats("Original cats", self.infos);
+        std.debug.print("Line: {}\n", .{self.line});
+    }
+};
 
 fn debugPrintItems(context: []const u8, items: anytype) void {
     std.debug.print("{s}: .{{", .{context});
