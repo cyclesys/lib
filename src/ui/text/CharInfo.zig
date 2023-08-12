@@ -8,7 +8,7 @@ const Self = @This();
 
 pub fn init(c: u32) Self {
     return Self{
-        .bidi = switch (ucd.trieValueDecoded(BidiCategory, c)) {
+        .bidi = switch (ucd.trieValue(BidiCategory, c)) {
             .Any => normalizeDerivedBidi(c),
             else => |cat| cat,
         },
@@ -16,7 +16,7 @@ pub fn init(c: u32) Self {
 }
 
 fn normalizeDerivedBidi(c: u32) BidiCategory.Value {
-    return switch (ucd.trieValueDecoded(DerivedBidi, c)) {
+    return switch (ucd.trieValue(DerivedBidi, c)) {
         .L => .L,
         .R => .R,
         .EN => .EN,

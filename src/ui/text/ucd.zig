@@ -1,11 +1,7 @@
 const std = @import("std");
 const ReverseUtf8Iterator = @import("ReverseUtf8Iterator.zig");
 
-pub fn trieValue(comptime Trie: type, c: []const u8) !Trie.Value {
-    return trieValueDecoded(Trie, try std.unicode.utf8Decode(c));
-}
-
-pub fn trieValueDecoded(comptime Trie: type, c: u32) Trie.Value {
+pub fn trieValue(comptime Trie: type, c: u32) Trie.Value {
     const FAST_SHIFT = 6;
     const FAST_DATA_BLOCK_LEN = 1 << FAST_SHIFT;
     const FAST_DATA_MASK = FAST_DATA_BLOCK_LEN - 1;
@@ -54,8 +50,8 @@ pub fn testBreakIterator(comptime name: []const u8, initFn: anytype) !void {
     const test_data = @embedFile("ucd/" ++ name);
     const allocator = std.testing.allocator;
 
-    var string = std.ArrayList(u8).init(allocator);
-    defer string.deinit();
+    var chars = std.ArrayList(u32).init(allocator);
+    defer chars.deinit();
 
     var breaks = std.ArrayList(u32).init(allocator);
     defer breaks.deinit();
@@ -86,10 +82,7 @@ pub fn testBreakIterator(comptime name: []const u8, initFn: anytype) !void {
                 ' ' => {
                     if (code_point_start) |start| {
                         const c = try std.fmt.parseInt(u21, line[start..unit_start], 16);
-
-                        var out: [4]u8 = undefined;
-                        const out_len = try std.unicode.utf8Encode(c, &out);
-                        try string.appendSlice(out[0..out_len]);
+                        try chars.append(c);
 
                         code_point = c;
                         code_point_start = null;
@@ -112,28 +105,26 @@ pub fn testBreakIterator(comptime name: []const u8, initFn: anytype) !void {
             }
         }
 
-        expectBreaks(string.items, breaks.items, initFn) catch |e| {
+        expectBreaks(chars.items, breaks.items, initFn) catch |e| {
             std.debug.print("Line: {}\n", .{line_num});
             return e;
         };
 
-        string.clearRetainingCapacity();
+        chars.clearRetainingCapacity();
         breaks.clearRetainingCapacity();
     }
 }
 
-fn expectBreaks(string: []const u8, breaks: []const u32, initFn: anytype) !void {
-    var iter = initFn(string);
+fn expectBreaks(chars: []const u32, breaks: []const u32, initFn: anytype) !void {
+    var iter = initFn(chars);
     for (breaks) |expected| {
-        const segment = if (try iter.next()) |slice| slice else return error.ExpectedMoreBreaks;
-        var segment_iter = ReverseUtf8Iterator.init(segment);
-        const break_code_point = segment_iter.next().?;
-        const actual: u32 = try std.unicode.utf8Decode(break_code_point);
+        const index = if (iter.next()) |i| i else return error.ExpectedMoreBreaks;
+        const actual = chars[index];
         std.testing.expectEqual(expected, actual) catch {
             return error.ExpectedBreakEqual;
         };
     }
-    std.testing.expectEqual(@as(?[]const u8, null), try iter.next()) catch {
+    std.testing.expectEqual(@as(?usize, null), iter.next()) catch {
         return error.ExpectedNoMoreBreaks;
     };
 }

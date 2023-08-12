@@ -5,12 +5,12 @@ const EastAsianWidth = @import("ucd/EastAsianWidth.zig");
 const GeneralCategory = @import("ucd/GeneralCategory.zig");
 const LineBreakProperty = @import("ucd/LineBreakProperty.zig");
 
-str: []const u8,
-offset: usize,
+chars: []const u32,
+i: usize,
 ris_count: usize,
 context: Context,
 cm_base: ?struct {
-    code_point: []const u8,
+    char: u32,
     prop: LineBreakProperty.Value,
 },
 
@@ -27,44 +27,40 @@ const Self = @This();
 
 pub const Break = struct {
     mandatory: bool,
-    str: []const u8,
+    i: usize,
 };
 
-pub fn init(str: []const u8) Self {
+pub fn init(chars: []const u32) Self {
     return Self{
-        .str = str,
-        .offset = 0,
+        .chars = chars,
+        .i = 0,
         .ris_count = 0,
         .context = .none,
         .cm_base = null,
     };
 }
 
-pub fn next(self: *Self) !?Break {
-    if (self.offset == self.str.len) {
+pub fn next(self: *Self) ?Break {
+    if (self.i >= self.chars.len) {
         return null;
     }
 
-    const start = self.offset;
-    var iter = std.unicode.Utf8Iterator{ .bytes = self.str[start..], .i = 0 };
-
-    var code_point = iter.nextCodepointSlice().?;
-    var before = try prop(code_point);
-    var prev_offset = self.offset;
+    var before_char = self.chars[self.i];
+    var before = prop(before_char);
+    var prev_i = self.i;
     self.context = .none;
     while (true) {
-        self.offset += code_point.len;
+        self.i += 1;
 
-        const after_code_point = if (iter.nextCodepointSlice()) |cp| cp else {
-            if (self.offset != self.str.len) {
-                return error.InvalidUtf8;
-            }
+        if (self.i >= self.chars.len) {
             return Break{
                 .mandatory = true,
-                .str = self.str[start..],
+                .i = prev_i,
             };
-        };
-        const after = try prop(after_code_point);
+        }
+
+        const after_char = self.chars[self.i];
+        const after = prop(after_char);
 
         if (before == .RI) {
             self.ris_count += 1;
@@ -72,25 +68,25 @@ pub fn next(self: *Self) !?Break {
             self.ris_count = 0;
         }
 
-        if (try self.checkPair(before, code_point, after, after_code_point)) |mandatory| {
+        if (self.checkPair(before, before_char, after, after_char)) |mandatory| {
             return Break{
                 .mandatory = mandatory,
-                .str = self.str[start..self.offset],
+                .i = prev_i,
             };
         }
-        code_point = after_code_point;
+        before_char = after_char;
         before = after;
-        prev_offset = self.offset;
+        prev_i = self.i;
     }
 }
 
 fn checkPair(
     self: *Self,
     before: LineBreakProperty.Value,
-    before_code_point: []const u8,
+    before_char: u32,
     after: LineBreakProperty.Value,
-    after_code_point: []const u8,
-) !?bool {
+    after_char: u32,
+) ?bool {
     return switch (before) {
         .CR => switch (after) {
             .LF => null,
@@ -104,53 +100,53 @@ fn checkPair(
         },
         .ZWJ => if (self.cm_base) |base| blk: {
             self.cm_base = null;
-            break :blk try self.checkPair(base.prop, base.code_point, after, after_code_point);
+            break :blk self.checkPair(base.prop, base.char, after, after_char);
         } else null,
         .CM => if (self.cm_base) |base| blk: {
             self.cm_base = null;
-            break :blk try self.checkPair(base.prop, base.code_point, after, after_code_point);
-        } else self.checkPair(.AL, "", after, after_code_point),
+            break :blk self.checkPair(base.prop, base.char, after, after_char);
+        } else self.checkPair(.AL, undefined, after, after_char),
         .WJ, .GL => switch (after) {
-            .CM, .ZWJ => self.setCmBase(before, before_code_point),
+            .CM, .ZWJ => self.setCmBase(before, before_char),
             else => null,
         },
         .BA => switch (after) {
             .GL, .CB => false,
             else => switch (self.context) {
                 .hl_hyba => null,
-                else => self.defaultAfter(before, before_code_point, after),
+                else => self.defaultAfter(before, before_char, after),
             },
         },
         .OP => switch (after) {
             .SP => self.setContext(.op_sp),
-            .CM, .ZWJ => self.setCmBase(before, before_code_point),
+            .CM, .ZWJ => self.setCmBase(before, before_char),
             else => null,
         },
         .QU => switch (after) {
             .SP => self.setContext(.qu_sp),
-            .CM, .ZWJ => self.setCmBase(before, before_code_point),
+            .CM, .ZWJ => self.setCmBase(before, before_char),
             else => null,
         },
         .CL => switch (after) {
             .SP => self.setContext(.clcp_sp),
             .NS => null,
-            .PR, .PO => if (try self.numericBefore(before_code_point)) null else false,
-            else => self.defaultAfter(before, before_code_point, after),
+            .PR, .PO => if (self.numericBefore()) null else false,
+            else => self.defaultAfter(before, before_char, after),
         },
         .CP => switch (after) {
             .SP => self.setContext(.clcp_sp),
             .NS => null,
-            .PR, .PO => if (try self.numericBefore(before_code_point)) null else false,
-            .AL, .HL, .NU => switch (try ucd.trieValue(EastAsianWidth, before_code_point)) {
-                .F, .W, .H => self.defaultAfter(before, before_code_point, after),
+            .PR, .PO => if (self.numericBefore()) null else false,
+            .AL, .HL, .NU => switch (ucd.trieValue(EastAsianWidth, before_char)) {
+                .F, .W, .H => self.defaultAfter(before, before_char, after),
                 else => null,
             },
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .B2 => switch (after) {
             .SP => self.setContext(.b2_sp),
             .B2 => null,
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .SP => switch (after) {
             .SP => null,
@@ -169,155 +165,149 @@ fn checkPair(
         },
         .CB => switch (after) {
             .BK, .CR, .LF, .NL, .SP, .ZW, .WJ, .GL, .CL, .CP, .EX, .IS, .SY, .QU => null,
-            .CM, .ZWJ => self.setCmBase(before, before_code_point),
+            .CM, .ZWJ => self.setCmBase(before, before_char),
             else => false,
         },
         .BB => switch (after) {
-            .CM, .ZWJ => self.setCmBase(before, before_code_point),
+            .CM, .ZWJ => self.setCmBase(before, before_char),
             .CB => false,
             else => null,
         },
         .HL => switch (after) {
             .HY, .BA => self.setContext(.hl_hyba),
             .NU, .PR, .PO, .AL, .HL => null,
-            .OP => switch (try ucd.trieValue(EastAsianWidth, after_code_point)) {
-                .F, .W, .H => self.defaultAfter(before, before_code_point, after),
+            .OP => switch (ucd.trieValue(EastAsianWidth, after_char)) {
+                .F, .W, .H => self.defaultAfter(before, before_char, after),
                 else => null,
             },
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .SY => switch (after) {
             .HL => null,
-            .NU => if (try self.numericBefore(before_code_point)) null else false,
-            else => self.defaultAfter(before, before_code_point, after),
+            .NU => if (self.numericBefore()) null else false,
+            else => self.defaultAfter(before, before_char, after),
         },
         .AL => switch (after) {
             .NU, .PR, .PO, .AL, .HL => null,
-            .OP => switch (try ucd.trieValue(EastAsianWidth, after_code_point)) {
-                .F, .W, .H => self.defaultAfter(before, before_code_point, after),
+            .OP => switch (ucd.trieValue(EastAsianWidth, after_char)) {
+                .F, .W, .H => self.defaultAfter(before, before_char, after),
                 else => null,
             },
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .NU => switch (after) {
             .AL, .HL, .PO, .PR, .NU => null,
-            .OP => switch (try ucd.trieValue(EastAsianWidth, after_code_point)) {
-                .F, .W, .H => self.defaultAfter(before, before_code_point, after),
+            .OP => switch (ucd.trieValue(EastAsianWidth, after_char)) {
+                .F, .W, .H => self.defaultAfter(before, before_char, after),
                 else => null,
             },
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .PR => switch (after) {
             .ID, .EB, .EM, .AL, .HL, .NU, .JL, .JV, .JT, .H2, .H3 => null,
-            .OP => if (try self.numericAfter(after_code_point)) null else false,
-            else => self.defaultAfter(before, before_code_point, after),
+            .OP => if (self.numericAfter()) null else false,
+            else => self.defaultAfter(before, before_char, after),
         },
         .ID => switch (after) {
             .PO => null,
             .EM => blk: {
-                break :blk switch (try ucd.trieValue(GeneralCategory, before_code_point)) {
+                break :blk switch (ucd.trieValue(GeneralCategory, before_char)) {
                     .Any => null,
-                    else => self.defaultAfter(before, before_code_point, after),
+                    else => self.defaultAfter(before, before_char, after),
                 };
             },
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .EB => switch (after) {
             .PO, .EM => null,
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .EM => switch (after) {
             .PO => null,
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .PO => switch (after) {
             .AL, .HL, .NU => null,
-            .OP => if (try self.numericAfter(after_code_point)) null else false,
-            else => self.defaultAfter(before, before_code_point, after),
+            .OP => if (self.numericAfter()) null else false,
+            else => self.defaultAfter(before, before_char, after),
         },
         .HY => switch (after) {
             .NU => null,
             .GL, .CB => false,
             else => switch (self.context) {
                 .hl_hyba => null,
-                else => self.defaultAfter(before, before_code_point, after),
+                else => self.defaultAfter(before, before_char, after),
             },
         },
         .IS => switch (after) {
-            .NU => if (try self.numericBefore(before_code_point)) null else false,
+            .NU => if (self.numericBefore()) null else false,
             .AL, .HL => null,
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .JL => switch (after) {
             .JL, .JV, .H2, .H3, .PO => null,
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .JV => switch (after) {
             .JV, .JT, .PO => null,
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .JT => switch (after) {
             .JT, .PO => null,
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .H2 => switch (after) {
             .JV, .JT, .PO => null,
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .H3 => switch (after) {
             .JT, .PO => null,
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
         .RI => switch (after) {
             .RI => if ((self.ris_count % 2) == 0) false else null,
-            else => self.defaultAfter(before, before_code_point, after),
+            else => self.defaultAfter(before, before_char, after),
         },
-        else => self.defaultAfter(before, before_code_point, after),
+        else => self.defaultAfter(before, before_char, after),
     };
 }
 
-fn setCmBase(self: *Self, before: LineBreakProperty.Value, before_code_point: []const u8) ?bool {
+fn setCmBase(self: *Self, before: LineBreakProperty.Value, before_char: u32) ?bool {
     self.cm_base = .{
-        .code_point = before_code_point,
+        .char = before_char,
         .prop = before,
     };
     return null;
 }
 
-fn numericBefore(self: *Self, before_code_point: []const u8) !bool {
-    var iter = ReverseUtf8Iterator.init(self.str[0 .. self.offset - before_code_point.len]);
-
-    while (iter.next()) |code_point| {
-        switch (try prop(code_point)) {
+fn numericBefore(self: *Self) bool {
+    var i = self.i - 1;
+    while (i > 0) : (i -= 1) {
+        switch (prop(self.chars[i - 1])) {
             .SY, .IS => continue,
             .NU => return true,
             else => break,
         }
     }
-
     return false;
 }
 
-fn numericAfter(self: *Self, after_code_point: []const u8) !bool {
-    var iter = std.unicode.Utf8Iterator{
-        .bytes = self.str[self.offset + after_code_point.len ..],
-        .i = 0,
-    };
-    if (iter.nextCodepointSlice()) |code_point| {
-        if (try prop(code_point) == .NU) {
+fn numericAfter(self: *Self) bool {
+    var i = self.i + 1;
+    while (i < self.chars.len) : (i += 1) {
+        if (prop(self.chars[i]) == .NU) {
             return true;
         }
     }
-
     return false;
 }
 
-fn defaultAfter(self: *Self, before: LineBreakProperty.Value, before_code_point: []const u8, after: LineBreakProperty.Value) ?bool {
+fn defaultAfter(self: *Self, before: LineBreakProperty.Value, before_char: u32, after: LineBreakProperty.Value) ?bool {
     return switch (after) {
         .BK, .CR, .LF, .NL, .SP, .ZW, .WJ, .GL, .CL, .CP, .EX, .IS, .SY, .QU, .BA, .HY, .NS, .IN => null,
         .CM, .ZWJ => blk: {
             self.cm_base = .{
-                .code_point = before_code_point,
+                .char = before_char,
                 .prop = before,
             };
             break :blk null;
@@ -331,11 +321,10 @@ fn setContext(self: *Self, context: Context) ?bool {
     return null;
 }
 
-fn prop(code_point: []const u8) !LineBreakProperty.Value {
-    const p = try ucd.trieValue(LineBreakProperty, code_point);
-    return switch (p) {
+fn prop(c: u32) LineBreakProperty.Value {
+    return switch (ucd.trieValue(LineBreakProperty, c)) {
         .AI, .SG, .XX, .Any => .AL,
-        .SA => switch (try ucd.trieValue(GeneralCategory, code_point)) {
+        .SA => switch (ucd.trieValue(GeneralCategory, c)) {
             .Mn, .Mc => .CM,
             else => .AL,
         },
@@ -344,19 +333,18 @@ fn prop(code_point: []const u8) !LineBreakProperty.Value {
     };
 }
 
-const LineBreakTest = @import("ucd/LineBreakTest.zig");
 const TestIter = struct {
     iter: Self,
 
-    pub fn init(str: []const u8) TestIter {
+    pub fn init(str: []const u32) TestIter {
         return TestIter{
             .iter = Self.init(str),
         };
     }
 
-    pub fn next(self: *TestIter) !?[]const u8 {
-        return if (try self.iter.next()) |brk|
-            brk.str
+    pub fn next(self: *TestIter) ?usize {
+        return if (self.iter.next()) |brk|
+            brk.i
         else
             null;
     }

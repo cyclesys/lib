@@ -3,46 +3,36 @@ const ucd = @import("ucd.zig");
 const ReverseUtf8Iterator = @import("ReverseUtf8Iterator.zig");
 const GraphemeBreakProperty = @import("ucd/GraphemeBreakProperty.zig");
 
-str: []const u8,
-offset: usize,
+chars: []const u32,
+i: usize,
 ris_count: usize,
 
 const Self = @This();
 
-pub fn init(str: []const u8) Self {
+pub fn init(chars: []const u32) Self {
     return Self{
-        .str = str,
-        .offset = 0,
+        .chars = chars,
+        .i = 0,
         .ris_count = 0,
     };
 }
 
-pub fn next(self: *Self) !?[]const u8 {
-    if (self.offset == self.str.len) {
+pub fn next(self: *Self) ?usize {
+    if (self.i >= self.chars.len) {
         return null;
     }
 
-    const start = self.offset;
-    var iter = std.unicode.Utf8Iterator{
-        .bytes = self.str[start..],
-        .i = 0,
-    };
-
-    var code_point = iter.nextCodepointSlice().?;
-    var before = try ucd.trieValue(GraphemeBreakProperty, code_point);
-    var prev_offset = self.offset;
+    const start = self.i;
+    var before = ucd.trieValue(GraphemeBreakProperty, self.chars[start]);
+    var prev_i = self.i;
     while (true) {
-        self.offset += code_point.len;
+        self.i += 1;
 
         var after: GraphemeBreakProperty.Value = undefined;
-        if (iter.nextCodepointSlice()) |next_code_point| {
-            code_point = next_code_point;
-            after = try ucd.trieValue(GraphemeBreakProperty, code_point);
+        if (self.i < self.chars.len) {
+            after = ucd.trieValue(GraphemeBreakProperty, self.chars[self.i]);
         } else {
-            if (self.offset != self.str.len) {
-                return error.InvalidUtf8;
-            }
-            return self.str[start..];
+            return prev_i;
         }
 
         if (before == .Regional_Indicator) {
@@ -84,9 +74,9 @@ pub fn next(self: *Self) !?[]const u8 {
             },
             .ZWJ => blk: {
                 if (after == .Extended_Pictographic) {
-                    var rev_iter = ReverseUtf8Iterator.init(self.str[0..prev_offset]);
-                    while (rev_iter.next()) |prev_code_point| {
-                        const prev = try ucd.trieValue(GraphemeBreakProperty, prev_code_point);
+                    var i: usize = prev_i;
+                    while (i > 0) : (i -= 1) {
+                        const prev = ucd.trieValue(GraphemeBreakProperty, self.chars[i - 1]);
                         switch (prev) {
                             .Extend => {},
                             .Extended_Pictographic => {
@@ -108,11 +98,11 @@ pub fn next(self: *Self) !?[]const u8 {
         };
 
         if (can_break) {
-            return self.str[start..self.offset];
+            return prev_i;
         }
 
         before = after;
-        prev_offset = self.offset;
+        prev_i = self.i;
     }
 }
 
@@ -123,6 +113,6 @@ inline fn defaultAfter(after: GraphemeBreakProperty.Value) bool {
     };
 }
 
-test {
+test "GraphemeBreakTest" {
     try ucd.testBreakIterator("GraphemeBreakTest.txt", init);
 }
