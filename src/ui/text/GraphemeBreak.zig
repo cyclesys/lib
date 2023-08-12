@@ -123,7 +123,6 @@ inline fn defaultAfter(after: GraphemeBreakProperty.Value) bool {
     };
 }
 
-const GraphemeBreakTest = @import("ucd/GraphemeBreakTest.zig");
 test {
-    try ucd.breakTest(GraphemeBreakTest, init);
+    try ucd.testBreakIterator("GraphemeBreakTest.txt", init);
 }

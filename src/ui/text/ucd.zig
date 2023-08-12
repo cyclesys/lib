@@ -28,7 +28,6 @@ pub fn trieValueDecoded(comptime Trie: type, c: u32) Trie.Value {
     if (c <= 0xFFFF) {
         return Trie.data[Trie.index[c >> FAST_SHIFT] + (c & FAST_DATA_MASK)];
     }
-
     if (c > 0x10FFFF) {
         return Trie.data[Trie.data.len - ERROR_VALUE_NEG_DATA_OFFSET];
     }
@@ -51,23 +50,90 @@ pub fn trieValueDecoded(comptime Trie: type, c: u32) Trie.Value {
     return Trie.data[data_block + (c & SMALL_DATA_MASK)];
 }
 
-pub fn breakTest(comptime BreakTest: type, initFn: anytype) !void {
-    for (BreakTest.cases, 0..) |case, case_i| {
-        var iter = initFn(case[0]);
-        const expected = case[1];
-        for (expected, 0..) |exp, exp_i| {
-            const grapheme = if (try iter.next()) |slice| slice else return error.TestExpectedMoreGraphemes;
-            var grapheme_iter = ReverseUtf8Iterator.init(grapheme);
-            const break_code_point = grapheme_iter.next().?;
-            const actual: u32 = @intCast(try std.unicode.utf8Decode(break_code_point));
-            std.testing.expectEqual(exp, actual) catch |e| {
-                std.debug.print("\nFAILED BREAK TEST: {} -- {}\n", .{ case_i, exp_i });
-                return e;
-            };
+pub fn testBreakIterator(comptime name: []const u8, initFn: anytype) !void {
+    const test_data = @embedFile("ucd/" ++ name);
+    const allocator = std.testing.allocator;
+
+    var string = std.ArrayList(u8).init(allocator);
+    defer string.deinit();
+
+    var breaks = std.ArrayList(u32).init(allocator);
+    defer breaks.deinit();
+
+    var lines = std.mem.splitScalar(u8, test_data, '\n');
+    var line_num: usize = 1;
+    while (lines.next()) |line| : (line_num += 1) {
+        if (line.len == 0 or line[0] == '#') {
+            continue;
         }
-        std.testing.expectEqual(@as(?[]const u8, null), try iter.next()) catch |e| {
-            std.debug.print("\nBREAK TEST OVERFLOWED: {}\n", .{case_i});
+
+        var iter = std.unicode.Utf8Iterator{ .bytes = line, .i = 0 };
+        var unit_start: usize = 0;
+        var code_point_start: ?usize = null;
+        var code_point: ?u32 = null;
+        while (iter.nextCodepointSlice()) |slice| : (unit_start += slice.len) {
+            const unit = try std.unicode.utf8Decode(slice);
+            switch (unit) {
+                '÷' => {
+                    if (code_point) |cp| {
+                        try breaks.append(cp);
+                        code_point = null;
+                    }
+                },
+                '×' => {
+                    code_point = null;
+                },
+                ' ' => {
+                    if (code_point_start) |start| {
+                        const c = try std.fmt.parseInt(u21, line[start..unit_start], 16);
+
+                        var out: [4]u8 = undefined;
+                        const out_len = try std.unicode.utf8Encode(c, &out);
+                        try string.appendSlice(out[0..out_len]);
+
+                        code_point = c;
+                        code_point_start = null;
+                    }
+                },
+                '0'...'9', 'A'...'F' => {
+                    if (code_point_start == null) {
+                        if (code_point != null) {
+                            @panic("unconsumed code point");
+                        }
+                        code_point_start = unit_start;
+                    }
+                },
+                '#' => {
+                    break;
+                },
+                else => {
+                    // ignore everything else
+                },
+            }
+        }
+
+        expectBreaks(string.items, breaks.items, initFn) catch |e| {
+            std.debug.print("Line: {}\n", .{line_num});
             return e;
         };
+
+        string.clearRetainingCapacity();
+        breaks.clearRetainingCapacity();
     }
+}
+
+fn expectBreaks(string: []const u8, breaks: []const u32, initFn: anytype) !void {
+    var iter = initFn(string);
+    for (breaks) |expected| {
+        const segment = if (try iter.next()) |slice| slice else return error.ExpectedMoreBreaks;
+        var segment_iter = ReverseUtf8Iterator.init(segment);
+        const break_code_point = segment_iter.next().?;
+        const actual: u32 = try std.unicode.utf8Decode(break_code_point);
+        std.testing.expectEqual(expected, actual) catch {
+            return error.ExpectedBreakEqual;
+        };
+    }
+    std.testing.expectEqual(@as(?[]const u8, null), try iter.next()) catch {
+        return error.ExpectedNoMoreBreaks;
+    };
 }

@@ -1,7 +1,6 @@
 const std = @import("std");
 const util = @import("util.zig");
 const BidiBrackets = @import("ucd/BidiBrackets.zig");
-const BreakTest = @import("ucd/BreakTest.zig");
 const Property = @import("ucd/Property.zig");
 const TrieBuilder = @import("ucd/TrieBuilder.zig");
 const UnicodeData = @import("ucd/UnicodeData.zig");
@@ -134,8 +133,8 @@ pub fn main() !void {
         try genPropertyTrie(ctx, "extracted/DerivedBidiClass.txt", "DerivedBidi.zig", &derived_bidi_extra);
     }
 
-    try genUcdFile(ctx, "BidiTest.txt");
-    try genUcdFile(ctx, "BidiCharacterTest.txt");
+    try genUcdFile(ctx, "BidiTest.txt", null);
+    try genUcdFile(ctx, "BidiCharacterTest.txt", null);
 
     {
         var emoji_property = try loadProperty(ctx, "emoji/emoji-data.txt", &.{"Extended_Pictographic"});
@@ -187,9 +186,9 @@ pub fn main() !void {
 
     try genPropertyTrie(ctx, "EastAsianWidth.txt", "EastAsianWidth.zig", null);
 
-    try genBreakTest(ctx, "auxiliary/GraphemeBreakTest.txt", "GraphemeBreakTest.zig");
-    try genBreakTest(ctx, "auxiliary/WordBreakTest.txt", "WordBreakTest.zig");
-    try genBreakTest(ctx, "auxiliary/LineBreakTest.txt", "LineBreakTest.zig");
+    try genUcdFile(ctx, "auxiliary/GraphemeBreakTest.txt", "GraphemeBreakTest.txt");
+    try genUcdFile(ctx, "auxiliary/WordBreakTest.txt", "WordBreakTest.txt");
+    try genUcdFile(ctx, "auxiliary/LineBreakTest.txt", "LineBreakTest.txt");
 }
 
 const Context = struct {
@@ -211,8 +210,8 @@ const Context = struct {
     }
 };
 
-fn genUcdFile(ctx: Context, comptime ucd_name: []const u8) !void {
-    const file_path = try util.ensureCachedFile(ctx.allocator, ctx.code_root, ucd_name, comptime ucdUrl(ucd_name));
+fn genUcdFile(ctx: Context, comptime ucd_name: []const u8, comptime code_file: ?[]const u8) !void {
+    const file_path = try util.ensureCachedFile(ctx.allocator, ctx.code_root, code_file orelse ucd_name, comptime ucdUrl(ucd_name));
     ctx.allocator.free(file_path);
 }
 
@@ -358,38 +357,6 @@ fn loadProperty(ctx: Context, comptime ucd_path: []const u8, filters: []const []
     var property = Property.init(ctx.allocator);
     try property.read(cached_file_path, filters);
     return property;
-}
-
-fn genBreakTest(ctx: Context, comptime ucd_path: []const u8, comptime code_file_name: []const u8) !void {
-    const cached_file_path = try cachedFilePath(ctx, ucd_path);
-    defer ctx.allocator.free(cached_file_path);
-
-    var break_test = try BreakTest.read(ctx.allocator, cached_file_path);
-    defer break_test.deinit();
-
-    var buf = std.ArrayList(u8).init(ctx.allocator);
-    defer buf.deinit();
-
-    try buf.appendSlice("pub const cases = [_]struct{ []const u8, []const u32 }{\n");
-    for (break_test.cases) |case| {
-        try buf.appendSlice("    .{ \"");
-        for (case.string) |code_point| {
-            try writeUnicodeCodePoint(&buf, code_point);
-        }
-        try buf.appendSlice("\", &.{ ");
-        for (case.breaks, 0..) |code_point, i| {
-            if (i > 0) {
-                try buf.appendSlice(", ");
-            }
-            try buf.append('\'');
-            try writeUnicodeCodePoint(&buf, code_point);
-            try buf.append('\'');
-        }
-        try buf.appendSlice(" } },\n");
-    }
-    try buf.appendSlice("};\n");
-
-    try genCodeFile(ctx, code_file_name, buf.items);
 }
 
 fn cachedFilePath(ctx: Context, comptime ucd_path: []const u8) ![]const u8 {

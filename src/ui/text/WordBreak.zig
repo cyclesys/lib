@@ -306,7 +306,6 @@ const WordState = struct {
     }
 };
 
-const WordBreakTest = @import("ucd/WordBreakTest.zig");
 test {
-    try ucd.breakTest(WordBreakTest, init);
+    try ucd.testBreakIterator("WordBreakTest.txt", init);
 }

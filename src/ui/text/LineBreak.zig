@@ -362,5 +362,5 @@ const TestIter = struct {
     }
 };
 test {
-    try ucd.breakTest(LineBreakTest, TestIter.init);
+    try ucd.testBreakIterator("LineBreakTest.txt", TestIter.init);
 }
