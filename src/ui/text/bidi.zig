@@ -1,8 +1,45 @@
 const std = @import("std");
 const ucd = @import("ucd.zig");
-const CharInfo = @import("CharInfo.zig");
 const BidiBrackets = @import("ucd/BidiBrackets.zig");
 const BidiCategory = @import("ucd/BidiCategory.zig");
+const DerivedBidi = @import("ucd/DerivedBidi.zig");
+
+pub fn charCats(allocator: std.mem.Allocator, chars: []const u32) ![]const BidiCat {
+    const cats = try allocator.alloc(BidiCat, chars.len);
+    for (chars, 0..) |c, i| {
+        cats[i] = switch (ucd.trieValue(BidiCategory, c)) {
+            .Any => switch (ucd.trieValue(DerivedBidi, c)) {
+                .L => .L,
+                .R => .R,
+                .EN => .EN,
+                .ES => .ES,
+                .ET => .ET,
+                .AN => .AN,
+                .CS => .CS,
+                .B => .B,
+                .S => .S,
+                .WS => .WS,
+                .ON => .ON,
+                .BN => .BN,
+                .NSM => .NSM,
+                .AL => .AL,
+                .LRO => .LRO,
+                .RLO => .RLO,
+                .LRE => .LRE,
+                .RLE => .RLE,
+                .PDF => .PDF,
+                .LRI => .LRI,
+                .RLI => .RLI,
+                .FSI => .FSI,
+                .PDI => .PDI,
+                .Any => .Any,
+                .Error => .Error,
+            },
+            else => |cat| cat,
+        };
+    }
+    return cats;
+}
 
 pub const Level = u8;
 
@@ -16,14 +53,14 @@ pub const Paragraph = struct {
     }
 };
 
-pub fn split(allocator: std.mem.Allocator, infos: []const CharInfo) ![]const Paragraph {
+pub fn split(allocator: std.mem.Allocator, cats: []const BidiCat) ![]const Paragraph {
     var paragraphs = std.ArrayList(Paragraph).init(allocator);
 
     var start: usize = 0;
     var isolate_count: usize = 0;
     var level: ?u8 = null;
-    for (infos, 0..) |info, i| {
-        switch (info.bidi) {
+    for (cats, 0..) |cat, i| {
+        switch (cat) {
             .B => {
                 try paragraphs.append(Paragraph{
                     .start = start,
@@ -53,19 +90,19 @@ pub fn split(allocator: std.mem.Allocator, infos: []const CharInfo) ![]const Par
 
 pub fn reorder(
     allocator: std.mem.Allocator,
-    infos: []const CharInfo,
+    cats: []const BidiCat,
     levels: []Level,
     paragraph_level: Level,
 ) ![]const usize {
-    std.debug.assert(infos.len > 0);
-    std.debug.assert(infos.len == levels.len);
+    std.debug.assert(cats.len > 0);
+    std.debug.assert(cats.len == levels.len);
     var seq_start: ?usize = null;
-    for (infos, 0..) |info, i| {
-        if (ignoreCat(info.bidi)) {
+    for (cats, 0..) |cat, i| {
+        if (ignoreCat(cat)) {
             continue;
         }
 
-        switch (info.bidi) {
+        switch (cat) {
             .B, .S => {
                 levels[i] = paragraph_level;
                 if (seq_start) |ss| {
@@ -90,7 +127,7 @@ pub fn reorder(
     var max_level = min_level;
     var prev_level = min_level;
     for (0..levels.len) |i| {
-        if (ignoreCat(infos[i].bidi)) {
+        if (ignoreCat(cats[i])) {
             continue;
         }
         const level = levels[i];
@@ -102,8 +139,8 @@ pub fn reorder(
     }
 
     var order = std.ArrayList(usize).init(allocator);
-    for (infos, 0..) |info, index| {
-        if (ignoreCat(info.bidi)) {
+    for (cats, 0..) |cat, index| {
+        if (ignoreCat(cat)) {
             continue;
         }
         try order.append(index);
@@ -115,8 +152,8 @@ pub fn reorder(
     while (level >= min_level) : (level -= 1) {
         var index: usize = 0;
         var level_start: ?usize = null;
-        for (infos, 0..) |info, i| {
-            if (ignoreCat(info.bidi)) {
+        for (cats, 0..) |cat, i| {
+            if (ignoreCat(cat)) {
                 continue;
             }
 
@@ -141,7 +178,7 @@ pub fn reorder(
 pub fn resolve(
     allocator: std.mem.Allocator,
     chars: []const u32,
-    infos: []const CharInfo,
+    char_cats: []const BidiCat,
     paragraph_level: Level,
 ) ![]Level {
     const levels = try allocator.alloc(Level, chars.len);
@@ -150,20 +187,20 @@ pub fn resolve(
     const cats = try allocator.alloc(BidiCat, chars.len);
     defer allocator.free(cats);
 
-    resolveExplicitTypes(infos, levels, cats, paragraph_level);
+    resolveExplicitTypes(char_cats, levels, cats, paragraph_level);
 
     const sequences = try resolveSequences(allocator, levels, cats, paragraph_level);
     defer freeSequences(allocator, sequences);
 
-    resolveWeakTypes(infos, cats, sequences);
-    try resolveNeutralTypes(allocator, chars, infos, cats, sequences);
+    resolveWeakTypes(char_cats, cats, sequences);
+    try resolveNeutralTypes(allocator, chars, char_cats, cats, sequences);
     resolveImplicitLevels(levels, cats, sequences);
 
     return levels;
 }
 
 fn resolveExplicitTypes(
-    infos: []const CharInfo,
+    char_cats: []const BidiCat,
     levels: []Level,
     cats: []BidiCat,
     paragraph_level: Level,
@@ -270,8 +307,8 @@ fn resolveExplicitTypes(
         .isolate = false,
     });
 
-    for (infos, 0..) |info, i| {
-        switch (info.bidi) {
+    for (char_cats, 0..) |cat, i| {
+        switch (cat) {
             .RLE => {
                 state.pushEmbedding(state.nextOddLevel(), null, i);
                 cats[i] = .RLE;
@@ -306,8 +343,8 @@ fn resolveExplicitTypes(
             .LRI => state.pushLRI(i),
             .FSI => {
                 var isolate_count: usize = 0;
-                for (infos[(i + 1)..]) |next_info| {
-                    switch (next_info.bidi) {
+                for (char_cats[(i + 1)..]) |next_cat| {
+                    switch (next_cat) {
                         .RLI, .LRI, .FSI => {
                             isolate_count += 1;
                         },
@@ -348,11 +385,11 @@ fn resolveExplicitTypes(
                 }
                 state.set(i, .PDI);
             },
-            .B, .BN => |cat| {
+            .B, .BN => {
                 levels[i] = paragraph_level;
                 cats[i] = cat;
             },
-            else => |cat| state.set(i, cat),
+            else => state.set(i, cat),
         }
     }
 }
@@ -472,9 +509,9 @@ fn freeSequences(allocator: std.mem.Allocator, sequences: []const Sequence) void
     allocator.free(sequences);
 }
 
-fn resolveWeakTypes(infos: []const CharInfo, cats: []BidiCat, sequences: []const Sequence) void {
+fn resolveWeakTypes(char_cats: []const BidiCat, cats: []BidiCat, sequences: []const Sequence) void {
     var state: struct {
-        infos: []const CharInfo,
+        char_cats: []const BidiCat,
         cats: []BidiCat,
         seq: Sequence,
         strong_type: BidiCat,
@@ -487,7 +524,7 @@ fn resolveWeakTypes(infos: []const CharInfo, cats: []BidiCat, sequences: []const
                     var p_cat: ?BidiCat = null;
                     var p_pos = pos;
                     while (p_pos.prev(self.seq, self.cats)) |p| {
-                        const c = self.infos[p.ii].bidi;
+                        const c = self.char_cats[p.ii];
                         if (c != .NSM) {
                             p_cat = c;
                             break;
@@ -525,7 +562,7 @@ fn resolveWeakTypes(infos: []const CharInfo, cats: []BidiCat, sequences: []const
                         self.checkCSBetweenAN(pos);
                     } else {
                         if (pos.prev(self.seq, self.cats)) |p| {
-                            const p_cat = self.infos[p.ii].bidi;
+                            const p_cat = self.char_cats[p.ii];
                             if (p_cat == .CS or p_cat == .ES) {
                                 if (p.prev(self.seq, self.cats)) |pp| {
                                     if (self.treatAsEn(pp, false)) {
@@ -583,7 +620,7 @@ fn resolveWeakTypes(infos: []const CharInfo, cats: []BidiCat, sequences: []const
 
         fn checkCSBetweenAN(self: @This(), pos: Sequence.Pos) void {
             if (pos.prev(self.seq, self.cats)) |p| {
-                if (self.infos[p.ii].bidi == .CS) {
+                if (self.char_cats[p.ii] == .CS) {
                     if (p.prev(self.seq, self.cats)) |pp| {
                         if (self.cats[pp.ii] == .AN) {
                             self.cats[p.ii] = .AN;
@@ -595,10 +632,10 @@ fn resolveWeakTypes(infos: []const CharInfo, cats: []BidiCat, sequences: []const
 
         fn treatAsEn(self: @This(), pos: Sequence.Pos, include_et: bool) bool {
             return switch (self.cats[pos.ii]) {
-                .EN => if (!include_et) self.infos[pos.ii].bidi != .ET else true,
-                .L => switch (self.infos[pos.ii].bidi) {
+                .EN => if (!include_et) self.char_cats[pos.ii] != .ET else true,
+                .L => switch (self.char_cats[pos.ii]) {
                     .EN, .ET => true,
-                    .NSM => if (pos.prev(self.seq, self.cats)) |p| self.infos[p.ii].bidi == .EN else false,
+                    .NSM => if (pos.prev(self.seq, self.cats)) |p| self.char_cats[p.ii] == .EN else false,
                     else => false,
                 },
                 else => false,
@@ -607,7 +644,7 @@ fn resolveWeakTypes(infos: []const CharInfo, cats: []BidiCat, sequences: []const
     } = undefined;
 
     for (sequences) |seq| {
-        state = .{ .infos = infos, .cats = cats, .seq = seq, .strong_type = seq.sos };
+        state = .{ .char_cats = char_cats, .cats = cats, .seq = seq, .strong_type = seq.sos };
         for (seq.runs, 0..) |run, ri| {
             for (run.start..run.end) |ii| {
                 const cat = cats[ii];
@@ -627,7 +664,7 @@ fn resolveWeakTypes(infos: []const CharInfo, cats: []BidiCat, sequences: []const
 fn resolveNeutralTypes(
     allocator: std.mem.Allocator,
     chars: []const u32,
-    infos: []const CharInfo,
+    char_cats: []const BidiCat,
     cats: []BidiCat,
     sequences: []const Sequence,
 ) !void {
@@ -655,8 +692,8 @@ fn resolveNeutralTypes(
                     if (cat == e) {
                         cats[pair.opening.ii] = e;
                         cats[pair.closing.ii] = e;
-                        checkNSMAfterPairedBracket(seq, pair.opening, infos, cats, e);
-                        checkNSMAfterPairedBracket(seq, pair.closing, infos, cats, e);
+                        checkNSMAfterPairedBracket(seq, pair.opening, char_cats, cats, e);
+                        checkNSMAfterPairedBracket(seq, pair.closing, char_cats, cats, e);
                         continue :outer;
                     }
 
@@ -689,8 +726,8 @@ fn resolveNeutralTypes(
             const new_cat = if (context == strong_type.?) context else e;
             cats[pair.opening.ii] = new_cat;
             cats[pair.closing.ii] = new_cat;
-            checkNSMAfterPairedBracket(seq, pair.opening, infos, cats, new_cat);
-            checkNSMAfterPairedBracket(seq, pair.closing, infos, cats, new_cat);
+            checkNSMAfterPairedBracket(seq, pair.opening, char_cats, cats, new_cat);
+            checkNSMAfterPairedBracket(seq, pair.closing, char_cats, cats, new_cat);
         }
 
         var prev_char: ?usize = null;
@@ -765,7 +802,7 @@ fn resolveNeutralTypes(
 fn checkNSMAfterPairedBracket(
     seq: Sequence,
     pos: Sequence.Pos,
-    infos: []const CharInfo,
+    char_cats: []const BidiCat,
     cats: []BidiCat,
     cat: BidiCat,
 ) void {
@@ -773,7 +810,7 @@ fn checkNSMAfterPairedBracket(
     var ii = pos.ii + 1;
     outer: while (ri < seq.runs.len) : (ri += 1) {
         while (ii < seq.runs[ri].end) : (ii += 1) {
-            const c = infos[ii].bidi;
+            const c = char_cats[ii];
             if (ignoreCat(c)) {
                 continue;
             }
@@ -1066,9 +1103,6 @@ test "BidiTest" {
     var chars = std.ArrayList(u32).init(allocator);
     defer chars.deinit();
 
-    var infos = std.ArrayList(CharInfo).init(allocator);
-    defer infos.deinit();
-
     var lines = std.mem.splitScalar(u8, test_data, '\n');
     while (lines.next()) |line| : (debug.line += 1) {
         if (line.len == 0 or line[0] == '#') {
@@ -1113,15 +1147,16 @@ test "BidiTest" {
         const paragraphs_data = std.mem.trim(u8, data_split.next().?, " \t");
 
         chars.clearRetainingCapacity();
-        infos.clearRetainingCapacity();
-        var cats = std.mem.splitScalar(u8, cats_data, ' ');
-        while (cats.next()) |cat| {
+        var cats_iter = std.mem.splitScalar(u8, cats_data, ' ');
+        while (cats_iter.next()) |cat| {
             const char = catStrToChar(cat);
             try chars.append(char);
-            try infos.append(CharInfo.init(char));
         }
 
-        debug.infos = infos.items;
+        const cats = try charCats(allocator, chars.items);
+        defer allocator.free(cats);
+
+        debug.cats = cats;
 
         const auto: u8 = 1;
         const ltr: u8 = 2;
@@ -1129,9 +1164,9 @@ test "BidiTest" {
         const paragraphs = try std.fmt.parseInt(u8, paragraphs_data, 10);
         if (paragraphs & auto != 0) {
             expectLevelsAndReorder(
-                findParagraphLevel(infos.items),
+                findParagraphLevel(cats),
                 chars.items,
-                infos.items,
+                cats,
                 levels.items,
                 order.items,
             ) catch |e| {
@@ -1143,7 +1178,7 @@ test "BidiTest" {
             expectLevelsAndReorder(
                 0,
                 chars.items,
-                infos.items,
+                cats,
                 levels.items,
                 order.items,
             ) catch |e| {
@@ -1155,7 +1190,7 @@ test "BidiTest" {
             expectLevelsAndReorder(
                 1,
                 chars.items,
-                infos.items,
+                cats,
                 levels.items,
                 order.items,
             ) catch |e| {
@@ -1217,10 +1252,10 @@ fn catStrToChar(cat: []const u8) u32 {
         @panic("invalid cat str");
 }
 
-fn findParagraphLevel(infos: []const CharInfo) Level {
+fn findParagraphLevel(cats: []const BidiCat) Level {
     var isolate_count: usize = 0;
-    for (infos) |info| {
-        switch (info.bidi) {
+    for (cats) |cat| {
+        switch (cat) {
             .B => {
                 break;
             },
@@ -1252,9 +1287,6 @@ test "BidiCharacterTest" {
     var chars = std.ArrayList(u32).init(allocator);
     defer chars.deinit();
 
-    var infos = std.ArrayList(CharInfo).init(allocator);
-    defer infos.deinit();
-
     var levels = std.ArrayList(?Level).init(allocator);
     defer levels.deinit();
 
@@ -1279,8 +1311,10 @@ test "BidiCharacterTest" {
         while (chars_iter.next()) |char_str| {
             const char = try std.fmt.parseInt(u32, char_str, 16);
             try chars.append(char);
-            try infos.append(CharInfo.init(char));
         }
+
+        const cats = try charCats(allocator, chars.items);
+        defer allocator.free(cats);
 
         const paragraph_level = try std.fmt.parseInt(Level, paragraph_level_data, 10);
 
@@ -1301,14 +1335,14 @@ test "BidiCharacterTest" {
             try order.append(try std.fmt.parseInt(usize, idx, 10));
         }
 
-        debug.infos = infos.items;
+        debug.cats = cats;
         debug.levels = levels.items;
         debug.order = order.items;
 
         expectLevelsAndReorder(
             paragraph_level,
             chars.items,
-            infos.items,
+            cats,
             levels.items,
             order.items,
         ) catch |e| {
@@ -1317,7 +1351,6 @@ test "BidiCharacterTest" {
         };
 
         chars.clearRetainingCapacity();
-        infos.clearRetainingCapacity();
         levels.clearRetainingCapacity();
         order.clearRetainingCapacity();
     }
@@ -1326,11 +1359,11 @@ test "BidiCharacterTest" {
 fn expectLevelsAndReorder(
     paragraph_level: Level,
     chars: []const u32,
-    infos: []const CharInfo,
+    cats: []const BidiCat,
     expected_levels: []const ?Level,
     expected_order: []const usize,
 ) !void {
-    const actual_levels = resolve(std.testing.allocator, chars, infos, paragraph_level) catch |e| {
+    const actual_levels = resolve(std.testing.allocator, chars, cats, paragraph_level) catch |e| {
         std.debug.print("\nFAILED BIDI RESOLVE\n", .{});
         return e;
     };
@@ -1340,7 +1373,7 @@ fn expectLevelsAndReorder(
         return e;
     };
 
-    const actual_order = reorder(std.testing.allocator, infos, actual_levels, paragraph_level) catch |e| {
+    const actual_order = reorder(std.testing.allocator, cats, actual_levels, paragraph_level) catch |e| {
         std.debug.print("\nFAILED BIDI REORDER\n", .{});
         return e;
     };
@@ -1369,13 +1402,13 @@ fn expectLevelsAndReorder(
 const DebugPrint = struct {
     levels: []const ?Level = undefined,
     order: []const usize = undefined,
-    infos: []const CharInfo = undefined,
+    cats: []const BidiCat = undefined,
     line: usize = 1,
 
     fn print(self: @This()) void {
         debugPrintItems("Expected levels", self.levels);
         debugPrintItems("Expected order", self.order);
-        debugPrintCats("Original cats", self.infos);
+        debugPrintCats("Original cats", self.cats);
         std.debug.print("Line: {}\n", .{self.line});
     }
 };
