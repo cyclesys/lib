@@ -23,6 +23,8 @@ pub fn build(b: *std.Build) !void {
     mach_freetype.linkFreetype(b, optimize, target, lib_tests);
     mach_freetype.linkHarfbuzz(b, optimize, target, lib_tests);
 
+    lib_tests.addModule("known_folders", b.dependency("known_folders", .{}).module("known-folders"));
+
     const run_tests = b.addRunArtifact(lib_tests);
     const run_tests_step = b.step("test", "Run tests");
     run_tests_step.dependOn(&run_tests.step);

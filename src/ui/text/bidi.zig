@@ -4,89 +4,93 @@ const BidiBrackets = @import("ucd/BidiBrackets.zig");
 const BidiCategory = @import("ucd/BidiCategory.zig");
 const DerivedBidi = @import("ucd/DerivedBidi.zig");
 
+pub const BidiCat = BidiCategory.Value;
+
+pub fn charCat(c: u32) BidiCat {
+    return switch (ucd.trieValue(BidiCategory, c)) {
+        .Any => switch (ucd.trieValue(DerivedBidi, c)) {
+            .L => .L,
+            .R => .R,
+            .EN => .EN,
+            .ES => .ES,
+            .ET => .ET,
+            .AN => .AN,
+            .CS => .CS,
+            .B => .B,
+            .S => .S,
+            .WS => .WS,
+            .ON => .ON,
+            .BN => .BN,
+            .NSM => .NSM,
+            .AL => .AL,
+            .LRO => .LRO,
+            .RLO => .RLO,
+            .LRE => .LRE,
+            .RLE => .RLE,
+            .PDF => .PDF,
+            .LRI => .LRI,
+            .RLI => .RLI,
+            .FSI => .FSI,
+            .PDI => .PDI,
+            .Any => .Any,
+            .Error => .Error,
+        },
+        else => |cat| cat,
+    };
+}
+
 pub fn charCats(allocator: std.mem.Allocator, chars: []const u32) ![]const BidiCat {
     const cats = try allocator.alloc(BidiCat, chars.len);
     for (chars, 0..) |c, i| {
-        cats[i] = switch (ucd.trieValue(BidiCategory, c)) {
-            .Any => switch (ucd.trieValue(DerivedBidi, c)) {
-                .L => .L,
-                .R => .R,
-                .EN => .EN,
-                .ES => .ES,
-                .ET => .ET,
-                .AN => .AN,
-                .CS => .CS,
-                .B => .B,
-                .S => .S,
-                .WS => .WS,
-                .ON => .ON,
-                .BN => .BN,
-                .NSM => .NSM,
-                .AL => .AL,
-                .LRO => .LRO,
-                .RLO => .RLO,
-                .LRE => .LRE,
-                .RLE => .RLE,
-                .PDF => .PDF,
-                .LRI => .LRI,
-                .RLI => .RLI,
-                .FSI => .FSI,
-                .PDI => .PDI,
-                .Any => .Any,
-                .Error => .Error,
-            },
-            else => |cat| cat,
-        };
+        cats[i] = charCat(c);
     }
     return cats;
 }
 
 pub const Level = u8;
 
-pub const Paragraph = struct {
-    start: usize,
-    end: usize,
-    level: Level,
+pub const ParagraphIterator = struct {
+    cats: []const BidiCat,
+    i: usize,
 
-    pub inline fn slice(self: Paragraph, s: anytype) @TypeOf(s) {
-        return s[self.start..self.end];
+    pub fn init(cats: []const BidiCat) ParagraphIterator {
+        return ParagraphIterator{
+            .cats = cats,
+            .i = 0,
+        };
+    }
+
+    pub fn hasNext(self: *ParagraphIterator) bool {
+        return self.i < self.cats.len;
+    }
+
+    pub fn next(self: *ParagraphIterator) Level {
+        std.debug.assert(self.hasNext());
+
+        var isolate_count: usize = 0;
+        var level: ?u8 = null;
+
+        for (self.cats) |cat| {
+            self.i += 1;
+            switch (cat) {
+                .B => break,
+                .LRI, .RLI, .FSI => isolate_count += 1,
+                .PDI => if (isolate_count > 0) {
+                    isolate_count -= 1;
+                },
+                .L => if (level == null and isolate_count == 0) {
+                    level = 0;
+                },
+                .R, .AL => if (level == null and isolate_count == 0) {
+                    level = 1;
+                },
+                else => {},
+            }
+        }
+
+        return level orelse 0;
     }
 };
-
-pub fn split(allocator: std.mem.Allocator, cats: []const BidiCat) ![]const Paragraph {
-    var paragraphs = std.ArrayList(Paragraph).init(allocator);
-
-    var start: usize = 0;
-    var isolate_count: usize = 0;
-    var level: ?u8 = null;
-    for (cats, 0..) |cat, i| {
-        switch (cat) {
-            .B => {
-                try paragraphs.append(Paragraph{
-                    .start = start,
-                    .end = i + 1,
-                    .level = level orelse 0,
-                });
-                start = i + 1;
-                isolate_count = 0;
-                level = null;
-            },
-            .LRI, .RLI, .FSI => isolate_count += 1,
-            .PDI => if (isolate_count > 0) {
-                isolate_count -= 1;
-            },
-            .L => if (level == null and isolate_count == 0) {
-                level = 0;
-            },
-            .R, .AL => if (level == null and isolate_count == 0) {
-                level = 1;
-            },
-            else => {},
-        }
-    }
-
-    return try paragraphs.toOwnedSlice();
-}
 
 pub fn reorder(
     allocator: std.mem.Allocator,
@@ -1085,8 +1089,6 @@ inline fn ignoreCat(cat: BidiCat) bool {
         else => false,
     };
 }
-
-const BidiCat = BidiCategory.Value;
 
 test "BidiTest" {
     const test_data = @embedFile("ucd/BidiTest.txt");

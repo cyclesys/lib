@@ -185,6 +185,7 @@ pub fn main() !void {
     }
 
     try genPropertyTrie(ctx, "EastAsianWidth.txt", "EastAsianWidth.zig", null);
+    try genPropertyTrie(ctx, "Scripts.txt", "Script.zig", null);
 
     try genUcdFile(ctx, "auxiliary/GraphemeBreakTest.txt", "GraphemeBreakTest.txt");
     try genUcdFile(ctx, "auxiliary/WordBreakTest.txt", "WordBreakTest.txt");
