@@ -10,11 +10,6 @@ lib: ft.Library,
 face: ft.Face,
 font: hb.Font,
 
-pub const Key = union(enum) {
-    index: u32,
-    size: f16,
-};
-
 pub fn init(allocator: std.mem.Allocator) !Self {
     const fonts_path = if (try kf.getPath(allocator, .fonts)) |path| path else {
         return error.NoFontsFolder;

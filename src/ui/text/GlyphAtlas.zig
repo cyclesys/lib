@@ -26,6 +26,8 @@ data: []u8,
 /// always square so this is both the width and the height.
 size: u32 = 0,
 
+original_size: u32,
+
 /// The nodes (rectangles) of available space.
 nodes: std.ArrayList(Node),
 
@@ -88,6 +90,7 @@ pub fn init(allocator: std.mem.Allocator, size: u32, format: Format) !Self {
         .allocator = allocator,
         .data = try allocator.alloc(u8, size * size * format.depth()),
         .size = size,
+        .original_size = size,
         .nodes = std.ArrayList(Node).init(allocator),
         .format = format,
     };
@@ -109,11 +112,35 @@ pub fn deinit(self: *Self) void {
     self.* = undefined;
 }
 
+// Empty the atlas. This doesn't reclaim any previously allocated memory.
+pub fn clear(self: *Self) void {
+    self.modified = true;
+    @memset(self.data, 0);
+    self.nodes.clearRetainingCapacity();
+
+    // Add our initial rectangle. This is the size of the full texture
+    // and is the initial rectangle we fit our regions in. We keep a 1px border
+    // to avoid artifacting when sampling the texture.
+    self.nodes.appendAssumeCapacity(Node{ .x = 1, .y = 1, .width = self.size - 2 });
+}
+
+pub fn put(self: *Self, width: u32, height: u32, data: []const u8) !Region {
+    const region = self.reserve(width, height) catch |e| blk: {
+        if (e == .AtlasFull) {
+            try self.grow(self.size + self.original_size);
+            break :blk try self.reserve(width, height);
+        }
+        return e;
+    };
+    self.set(region, data);
+    return region;
+}
+
 /// Reserve a region within the atlas with the given width and height.
 ///
 /// May allocate to add a new rectangle into the internal list of rectangles.
 /// This will not automatically enlarge the texture if it is full.
-pub fn reserve(self: *Self, width: u32, height: u32) !Region {
+fn reserve(self: *Self, width: u32, height: u32) !Region {
     // x, y are populated within :best_idx below
     var region = Region{ .x = 0, .y = 0, .width = width, .height = height };
 
@@ -147,7 +174,7 @@ pub fn reserve(self: *Self, width: u32, height: u32) !Region {
         }
 
         // If we never found a chosen index, the atlas cannot fit our region.
-        break :best_idx chosen orelse return Error.AtlasFull;
+        break :best_idx chosen orelse return error.AtlasFull;
     };
 
     // Insert our new node for this rectangle at the exact best index
@@ -224,7 +251,7 @@ fn merge(self: *Self) void {
 /// Set the data associated with a reserved region. The data is expected
 /// to fit exactly within the region. The data must be formatted with the
 /// proper bpp configured on init.
-pub fn set(self: *Self, reg: Region, data: []const u8) void {
+fn set(self: *Self, reg: Region, data: []const u8) void {
     std.debug.assert(reg.x < (self.size - 1));
     std.debug.assert((reg.x + reg.width) <= (self.size - 1));
     std.debug.assert(reg.y < (self.size - 1));
@@ -246,7 +273,7 @@ pub fn set(self: *Self, reg: Region, data: []const u8) void {
 }
 
 // Grow the texture to the new size, preserving all previously written data.
-pub fn grow(self: *Self, size_new: u32) !void {
+fn grow(self: *Self, size_new: u32) !void {
     std.debug.assert(size_new >= self.size);
     if (size_new == self.size) return;
 
@@ -288,18 +315,6 @@ pub fn grow(self: *Self, size_new: u32) !void {
     // We are both modified and resized
     self.modified = true;
     self.resized = true;
-}
-
-// Empty the atlas. This doesn't reclaim any previously allocated memory.
-pub fn clear(self: *Self) void {
-    self.modified = true;
-    @memset(self.data, 0);
-    self.nodes.clearRetainingCapacity();
-
-    // Add our initial rectangle. This is the size of the full texture
-    // and is the initial rectangle we fit our regions in. We keep a 1px border
-    // to avoid artifacting when sampling the texture.
-    self.nodes.appendAssumeCapacity(Node{ .x = 1, .y = 1, .width = self.size - 2 });
 }
 
 test "exact fit" {
