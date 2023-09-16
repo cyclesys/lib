@@ -273,7 +273,7 @@ test "float serde" {
 
 test "pointer serde" {
     const result = try serdeLeak(*const u8, &@as(u8, 10));
-    defer std.testing.allocator.destroy(result[0]);
+    defer std.testing.allocator.free(result[0]);
 
     try std.testing.expectEqual(result[1].*, 10);
 }
