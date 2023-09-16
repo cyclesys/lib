@@ -9,27 +9,27 @@ pub const Tree = struct {
 };
 
 pub const Constraints = struct {
-    width: ?u16 = null,
-    height: ?u126 = null,
+    width: ?u32 = null,
+    height: ?u32 = null,
 };
 
 pub const Size = struct {
-    width: u16,
-    height: u16,
+    width: u32,
+    height: u32,
 };
 
 pub const Offset = struct {
-    x: u16,
-    y: u16,
+    x: u32,
+    y: u32,
 
     pub const zero = Offset{
         .x = 0,
         .y = 0,
     };
 
-    pub fn add(self: *Offset, other: Offset) void {
-        self.x += other.x;
-        self.y += other.y;
+    pub fn plus(left: Offset, right: Offset) Offset {
+        left.x += right.x;
+        left.y += right.y;
     }
 };
 
@@ -506,7 +506,7 @@ fn InputTreeNode(comptime Node: type) type {
         const Self = @This();
 
         pub fn offset(self: *Self, by: Offset) void {
-            self.offset.add(by);
+            self.offset = self.offset.plus(by);
             if (Child != void) {
                 walkTree(Child, &self.child, by, offsetNode);
             }
@@ -532,11 +532,11 @@ fn RenderTreeNode(comptime Node: type) type {
         child: Child,
 
         pub const id = Node.id;
-        const Child = if (Node.Child == void) void else RenderTree(Node.Child);
+        pub const Child = if (Node.Child == void) void else RenderTree(Node.Child);
         const Self = @This();
 
         pub fn offset(self: *Self, by: Offset) void {
-            self.offset.add(by);
+            self.offset = self.offset.plus(by);
             if (Child != void) {
                 walkTree(Child, &self.child, by, offsetNode);
             }

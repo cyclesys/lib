@@ -5,6 +5,7 @@ pub usingnamespace windows.user32;
 
 pub const HANDLE = windows.HANDLE;
 pub const BOOL = windows.BOOL;
+pub const UINT = windows.UINT;
 pub const INVALID_HANDLE_VALUE = windows.INVALID_HANDLE_VALUE;
 pub const INFINITE = windows.INFINITE;
 pub const WAIT_OBJECT_0 = windows.WAIT_OBJECT_0;
@@ -49,3 +50,5 @@ pub extern "kernel32" fn ResetEvent(
 pub extern "kernel32" fn SetEvent(
     hEvent: windows.HANDLE,
 ) callconv(windows.WINAPI) windows.BOOL;
+
+pub extern "user32" fn GetDpiForSystem() UINT;

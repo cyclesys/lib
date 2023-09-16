@@ -4,6 +4,7 @@ const tree = @import("../tree.zig");
 const bidi = @import("bidi.zig");
 const ucd = @import("ucd.zig");
 const FontCache = @import("FontCache.zig");
+const GlyphCache = @import("GlyphCache.zig");
 const LineBreak = @import("LineBreak.zig");
 const Script = @import("ucd/Script.zig");
 
@@ -20,10 +21,7 @@ layout_data: ?struct {
 },
 
 pub const LayoutGlyph = struct {
-    font: struct {
-        index: u32,
-        size: f16,
-    },
+    key: GlyphCache.Key,
     x: u32,
     y: u32,
 };
@@ -236,7 +234,7 @@ fn addGlyphs(self: *Self, glyphs: *std.ArrayList(ShapedGlyph), prev_level: bidi.
     }
 }
 
-pub fn layoutGlyphs(self: *Self) ![]const LayoutGlyph {
+pub fn layoutGlyphs(self: *Self) []const LayoutGlyph {
     return self.layout_data.?.glyphs.items;
 }
 
@@ -419,7 +417,7 @@ fn addLayoutGlyphLine(
     for (order) |i| {
         const glyph = pg.glyphs.items[i];
         try layout_glyphs.append(LayoutGlyph{
-            .font = .{
+            .font = GlyphCache.Key{
                 .index = glyph.index,
                 .size = font_size,
             },
