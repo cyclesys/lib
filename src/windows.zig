@@ -3,9 +3,13 @@ const windows = @import("std").os.windows;
 pub usingnamespace windows.kernel32;
 pub usingnamespace windows.user32;
 
+pub const FARPROC = windows.FARPROC;
+pub const HINSTANCE = windows.HINSTANCE;
+pub const HMODULE = windows.HMODULE;
 pub const HANDLE = windows.HANDLE;
 pub const BOOL = windows.BOOL;
 pub const UINT = windows.UINT;
+pub const LPCSTR = windows.LPCSTR;
 pub const INVALID_HANDLE_VALUE = windows.INVALID_HANDLE_VALUE;
 pub const INFINITE = windows.INFINITE;
 pub const WAIT_OBJECT_0 = windows.WAIT_OBJECT_0;
@@ -14,6 +18,8 @@ pub const WAIT_ABANDONED = windows.WAIT_ABANDONED;
 pub const WAIT_FAILED = windows.WAIT_FAILED;
 pub const PAGE_READWRITE = windows.PAGE_READWRITE;
 pub const FILE_MAP_ALL_ACCESS = 983071;
+
+pub extern "kernel32" fn LoadLibraryA(lpLibFileName: LPCSTR) ?HMODULE;
 
 pub extern "kernel32" fn CreateFileMappingW(
     hFile: windows.HANDLE,

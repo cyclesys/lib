@@ -1,6 +1,6 @@
 const std = @import("std");
 const mach_freetype = @import("mach_freetype");
-const vulkan_zig = @import("vulkan_zig");
+const vulkan = @import("build/vulkan.zig");
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) !void {
     mach_freetype.linkHarfbuzz(b, optimize, target, lib_tests);
 
     lib_tests.addModule("known_folders", b.dependency("known_folders", .{}).module("known-folders"));
+    lib_tests.addModule("vulkan", try vulkan.module(b));
 
     const run_tests = b.addRunArtifact(lib_tests);
     const run_tests_step = b.step("test", "Run tests");

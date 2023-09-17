@@ -1,21 +1,17 @@
 const vk = @import("vulkan");
-const win32 = struct {
-    const mod = @import("win32");
-    usingnamespace mod.foundation;
-    usingnamespace mod.system.library_loader;
-};
+const win = @import("../../windows.zig");
 
-var vulkan_lib: ?win32.HINSTANCE = null;
-var vkGetInstanceProcAddr: ?win32.FARPROC = null;
-pub fn vulkanLoader() !win32.FARPROC {
+var vulkan_lib: ?win.HINSTANCE = null;
+var vkGetInstanceProcAddr: ?win.FARPROC = null;
+pub fn vulkanLoader() !win.FARPROC {
     if (vkGetInstanceProcAddr == null) {
         const vulkan_lib_name: [:0]const u8 = "vulkan-1.dll";
-        vulkan_lib = win32.LoadLibraryA(@as([*]const u8, vulkan_lib_name));
+        vulkan_lib = win.LoadLibraryA(@as([*]const u8, vulkan_lib_name));
         if (vulkan_lib == null) {
             return error.NoVulkanLib;
         }
 
-        vkGetInstanceProcAddr = win32.GetProcAddress(
+        vkGetInstanceProcAddr = win.GetProcAddress(
             vulkan_lib,
             @as([:0]const u8, "vkGetInstanceProcAddr"),
         );
@@ -40,4 +36,32 @@ pub const InstanceFns = vk.InstanceWrapper(.{
 
 pub const DeviceFns = vk.DeviceWrapper(.{
     .destroyDevice = true,
+
+    .createCommandPool = true,
+    .destroyCommandPool = true,
+    .resetCommandPool = true,
+
+    .allocateCommandBuffers = true,
+    .freeCommandBuffers = true,
+    .beginCommandBuffer = true,
+
+    .queueSubmit = true,
+
+    .createRenderPass = true,
+    .destroyRenderPass = true,
+
+    .createFramebuffer = true,
+    .destroyFramebuffer = true,
+
+    .cmdBeginRendering = true,
+    .cmdEndRendering = true,
+
+    .cmdBeginRenderPass = true,
+    .cmdEndRenderPass = true,
+
+    .createGraphicsPipeline = true,
+    .destroyPipeline = true,
+    .cmdBindPipeline = true,
+
+    .createFence = true,
 });

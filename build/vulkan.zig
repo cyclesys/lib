@@ -1,5 +1,4 @@
 const std = @import("std");
-const vkgen = @import("../libs/vulkan-zig/generator/index.zig");
 const util = @import("util.zig");
 
 pub fn module(b: *std.Build) !*std.Build.Module {
@@ -9,8 +8,9 @@ pub fn module(b: *std.Build) !*std.Build.Module {
         vk_hash ++ "/xml/vk.xml";
 
     const vk_file_path = try util.ensureCachedFile(b.allocator, b.cache_root.path.?, vk_file_name, vk_file_url);
-    defer b.allocator.free(vk_file_path);
 
-    const vk_step = vkgen.VkGenerateStep.create(b, vk_file_path);
-    return vk_step.getModule();
+    const vkzig_dep = b.dependency("vulkan_zig", .{
+        .registry = vk_file_path,
+    });
+    return vkzig_dep.module("vulkan-zig");
 }

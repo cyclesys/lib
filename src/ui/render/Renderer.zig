@@ -20,6 +20,11 @@ device_fns: fns.DeviceFns,
 graphics_queue_index: u32,
 graphics_queue: vk.Queue,
 
+command_pool: vk.CommandPool,
+command_buffer: vk.CommandBuffer,
+
+pipeline: vk.Pipeline,
+
 pub const DeviceId = [vk.UUID_SIZE]u8;
 const Self = @This();
 
@@ -57,6 +62,8 @@ pub fn init(
 
     const graphics_queue = device_fns.getDeviceQueue(device, physical.graphics_queue_index, 0);
 
+    const bp = try createCommandPoolAndBuffer(device_fns, device, physical.graphics_queue_index);
+
     return Self{
         .allocator = allocator,
         .base_fns = base_fns,
@@ -69,33 +76,19 @@ pub fn init(
         .device_fns = device_fns,
         .graphics_queue_index = physical.graphics_queue_index,
         .graphics_queue = graphics_queue,
+        .command_pool = bp.command_pool,
+        .command_buffer = bp.command_buffer,
     };
 }
 
+pub fn deinit(self: *Self) void {
+    _ = self;
+}
+
 pub fn render(self: *Self, render_tree: anytype, target: *Target) !void {
-    const RenderTree = @TypeOf(render_tree);
-    if (std.meta.trait.isTuple(RenderTree)) {
-        self.renderTuple(render_tree, target);
-    } else {
-        self.renderNode(render_tree, target);
-    }
-}
-
-fn renderTuple(self: *Self, tuple: anytype, target: *Target) !void {
     _ = self;
-    _ = tuple;
+    _ = render_tree;
     _ = target;
-}
-
-fn renderNode(self: *Self, node: anytype, target: *Target) !void {
-    _ = self;
-    _ = target;
-    const Node = @TypeOf(node);
-    switch (Node.id) {
-        .Rect => {},
-        .Text => {},
-        else => @compileError("invalid render node"),
-    }
 }
 
 fn createInstance(
@@ -189,8 +182,8 @@ fn createDevice(
     graphics_queue_index: u32,
 ) !vk.Device {
     const priorities = [_]f32{1.0};
-    const queue_create_infos = .{
-        .{
+    const queue_create_infos = [_]vk.DeviceQueueCreateInfo{
+        vk.DeviceQueueCreateInfo{
             .queue_family_index = graphics_queue_index,
             .queue_count = 1,
             .p_queue_priorities = &priorities,
@@ -207,6 +200,29 @@ fn createDevice(
     );
 
     return device;
+}
+
+fn createCommandPoolAndBuffer(device_fns: fns.DeviceFns, device: vk.Device, queue_family_index: u32) !struct {
+    command_pool: vk.CommandPool,
+    command_buffer: vk.CommandBuffer,
+} {
+    const pool_create_info = vk.CommandPoolCreateInfo{
+        .queue_family_index = queue_family_index,
+    };
+    const command_pool = try device_fns.createCommandPool(device, &pool_create_info, null);
+
+    var buffer_allocate_info = vk.CommandBufferAllocateInfo{
+        .command_pool = command_pool,
+        .level = .primary,
+        .command_buffer_count = 1,
+    };
+    var command_buffer: vk.CommandBuffer = undefined;
+    try device_fns.allocateCommandBuffers(device, &buffer_allocate_info, &command_buffer);
+
+    return .{
+        .command_pool = command_pool,
+        .command_buffer = command_buffer,
+    };
 }
 
 const required_extensions = struct {

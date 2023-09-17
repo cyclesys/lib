@@ -75,6 +75,7 @@ fn addNode(state: *State, node: anytype) !void {
         .Text => {
             try addText(node.offset, node.size, node.info);
         },
+        else => @compileError("invalid render node"),
     }
 }
 
