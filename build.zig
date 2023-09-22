@@ -6,8 +6,8 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    mach_freetype.brotli_import_path = "mach_freetype.freetype.brotli";
-    mach_freetype.freetype_import_path = "mach_freetype.freetype";
+    _ = b.addModule("cycle_lib", .{ .source_file = .{ .path = "src/lib.zig" } });
+
     const mach_freetype_dep = b.dependency("mach_freetype", .{
         .target = target,
         .optimize = optimize,
@@ -20,8 +20,8 @@ pub fn build(b: *std.Build) !void {
     });
     lib_tests.addModule("freetype", mach_freetype_dep.module("mach-freetype"));
     lib_tests.addModule("harfbuzz", mach_freetype_dep.module("mach-harfbuzz"));
-    mach_freetype.linkFreetype(b, optimize, target, lib_tests);
-    mach_freetype.linkHarfbuzz(b, optimize, target, lib_tests);
+    mach_freetype.linkFreetype(mach_freetype_dep.builder, lib_tests);
+    mach_freetype.linkHarfbuzz(mach_freetype_dep.builder, lib_tests);
 
     lib_tests.addModule("known_folders", b.dependency("known_folders", .{}).module("known-folders"));
     lib_tests.addModule("vulkan", try vulkan.module(b));
