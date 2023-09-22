@@ -49,19 +49,19 @@ pub const InitChannel = struct {
 
         const reader = Reader.init(
             allocator,
-            try channel.Channel.import(false, .{
-                .wait_ev = try handles.next(),
-                .signal_ev = try handles.next(),
-                .file = try handles.next(),
-            }),
+            try channel.Channel.import(
+                try handles.next(),
+                try handles.next(),
+                try handles.next(),
+            ),
         );
         var writer = Writer.init(
             allocator,
-            try channel.Channel.import(true, .{
-                .wait_ev = try handles.next(),
-                .signal_ev = try handles.next(),
-                .file = try handles.next(),
-            }),
+            try channel.Channel.import(
+                try handles.next(),
+                try handles.next(),
+                try handles.next(),
+            ),
         );
 
         try writer.write(.{
