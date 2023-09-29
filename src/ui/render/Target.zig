@@ -1,131 +1,26 @@
 const vk = @import("vulkan");
 const win = @import("../../windows.zig");
-const fns = @import("fns.zig");
+const Context = @import("Context.zig");
+const Pipeline = @import("Pipeline.zig");
 
-memory: vk.DeviceMemory,
 image: vk.Image,
-image_view: vk.ImageView,
+view: vk.ImageView,
+memory: vk.DeviceMemory,
+framebuffer: vk.Framebuffer,
 
 const Self = @This();
 
-pub fn create(
-    device_fns: anytype,
-    device: vk.Device,
-    memory_type_index: u32,
-    format: vk.Format,
-    queue_family_index: u32,
+pub fn init(
+    context: *const Context,
+    pipeline: *const Pipeline,
     width: u32,
     height: u32,
 ) !Self {
-    const iv = try createImageAndView(
-        device_fns,
-        device,
-        format,
-        queue_family_index,
-        width,
-        height,
-        vk.ImageUsageFlags{
-            .sampled_bit = true,
-            .input_attachment_bit = true,
-        },
-    );
-
-    const memory = try device_fns.allocateMemory(
-        device,
-        &vk.MemoryAllocateInfo{
-            .p_next = &vk.ExportMemoryAllocateInfo{
-                .handle_types = vk.ExternalMemoryHandleTypeFlags{ .opaque_win32_bit = true },
-            },
-            .allocation_size = iv.reqs.size,
-            .memory_type_index = memory_type_index,
-        },
-        null,
-    );
-
-    return Self{
-        .memory = memory,
-        .image = iv.image,
-        .view = iv.view,
-    };
-}
-
-pub fn exportMemory(
-    self: *Self,
-    device_fns: anytype,
-    dev: vk.Device,
-) !win.HANDLE {
-    var handle: win.HANDLE = undefined;
-    try device_fns.getMemoryWin32HandleKHR(
-        dev,
-        &vk.MemoryGetWin32HandleInfoKHR{
-            .memory = self.memory,
-            .handle_type = vk.ExternalMemoryHandleTypeFlags{ .opaque_win32_bit = true },
-        },
-        &handle,
-    );
-    return handle;
-}
-
-pub fn import(
-    device_fns: fns.DeviceFns,
-    device: vk.Device,
-    memory_type_index: u32,
-    format: vk.Format,
-    queue_family_index: u32,
-    width: u32,
-    height: u32,
-    handle: win.HANDLE,
-) !Self {
-    const iv = try createImageAndView(
-        device_fns,
-        device,
-        format,
-        queue_family_index,
-        width,
-        height,
-        vk.ImageUsageFlags{ .color_attachment_bit = true },
-    );
-
-    const memory = try device_fns.allocateMemory(
-        device,
-        &vk.MemoryAllocateInfo{
-            .p_next = &vk.ImportMemoryWin32HandleInfoKHR{
-                .handle_type = vk.ExternalMemoryHandleTypeFlags{ .opaque_win32_bit = true },
-                .handle = handle,
-                .name = null,
-            },
-            .allocation_size = iv.reqs.size,
-            .memory_type_index = memory_type_index,
-        },
-        null,
-    );
-
-    return Self{
-        .memory = memory,
-        .image = iv.image,
-        .view = iv.view,
-    };
-}
-
-fn createImageAndView(
-    device_fns: anytype,
-    device: vk.Device,
-    format: vk.Format,
-    queue_family_index: u32,
-    width: u32,
-    height: u32,
-    usage: vk.ImageUsageFlags,
-) !struct {
-    image: vk.Image,
-    view: vk.ImageView,
-    reqs: vk.MemoryRequirements,
-} {
-    const image = try device_fns.createImage(
-        device,
+    const image = try context.device_fns.createImage(
+        context.device,
         &vk.ImageCreateInfo{
-            .flags = vk.ImageCreateFlags{ .@"2d_array_compatible_bit" = true },
             .image_type = .@"2d",
-            .format = format,
+            .format = .r32g32b32a32_sfloat,
             .extent = vk.Extent3D{
                 .width = width,
                 .height = height,
@@ -135,21 +30,24 @@ fn createImageAndView(
             .array_layers = 1,
             .samples = .@"1_bit",
             .tiling = .optimal,
-            .usage = usage,
+            .usage = vk.ImageUsageFlags{
+                .sampled_bit = true,
+                .input_attachment_bit = true,
+            },
             .sharing_mode = .exclusive,
             .queue_family_index_count = 1,
-            .p_queue_family_indices = &queue_family_index,
+            .p_queue_family_indices = &context.queue_family_index,
             .initial_layout = .undefined,
         },
         null,
     );
 
-    const view = try device_fns.createImageView(
-        device,
+    const view = try context.device_fns.createImageView(
+        context.device,
         &vk.ImageViewCreateInfo{
             .image = image,
             .view_type = .@"2d",
-            .format = format,
+            .format = .r32g32b32a32_sfloat,
             .components = vk.ComponentMapping{
                 .r = .identity,
                 .g = .identity,
@@ -167,11 +65,56 @@ fn createImageAndView(
         null,
     );
 
-    const reqs = device_fns.getImageMemoryRequirements(device, image);
+    const reqs = context.device_fns.getImageMemoryRequirements(context.device, image);
 
-    return .{
-        image,
-        view,
-        reqs,
+    const memory = try context.device_fns.allocateMemory(
+        context.device,
+        &vk.MemoryAllocateInfo{
+            .p_next = &vk.ExportMemoryAllocateInfo{
+                .handle_types = vk.ExternalMemoryHandleTypeFlags{ .opaque_win32_bit = true },
+            },
+            .allocation_size = reqs.size,
+            .memory_type_index = context.device_local_memory_index,
+        },
+        null,
+    );
+
+    try context.device_fns.bindImageMemory(context.device, image, memory, 0);
+
+    const framebuffer = try context.device_fns.createFramebuffer(
+        context.device,
+        &vk.FramebufferCreateInfo{
+            .render_pass = pipeline.render_pass,
+            .attachment_count = 1,
+            .p_attachments = &view,
+            .width = width,
+            .height = height,
+            .layers = 1,
+        },
+        null,
+    );
+
+    return Self{
+        .memory = memory,
+        .image = image,
+        .view = view,
+        .framebuffer = framebuffer,
     };
+}
+
+pub fn memHandle(
+    self: *Self,
+    device_fns: anytype,
+    dev: vk.Device,
+) !win.HANDLE {
+    var handle: win.HANDLE = undefined;
+    try device_fns.getMemoryWin32HandleKHR(
+        dev,
+        &vk.MemoryGetWin32HandleInfoKHR{
+            .memory = self.memory,
+            .handle_type = vk.ExternalMemoryHandleTypeFlags{ .opaque_win32_bit = true },
+        },
+        &handle,
+    );
+    return handle;
 }

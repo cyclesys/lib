@@ -26,8 +26,6 @@ data: []u8,
 /// always square so this is both the width and the height.
 size: u32 = 0,
 
-original_size: u32,
-
 /// The nodes (rectangles) of available space.
 nodes: std.ArrayList(Node),
 
@@ -48,8 +46,6 @@ modified: bool = false,
 /// a new texture needs to be allocated or if an existing one can be
 /// updated in-place.
 resized: bool = false,
-
-const Self = @This();
 
 pub const Format = enum(u8) {
     greyscale = 0,
@@ -75,6 +71,9 @@ pub const Error = error{
     /// Atlas cannot fit the desired region. You must enlarge the atlas.
     AtlasFull,
 };
+const Self = @This();
+
+const grow_size = 128;
 
 /// A region within the texture atlas. These can be acquired using the
 /// "reserve" function. A region reservation is required to write data.
@@ -85,7 +84,8 @@ pub const Region = extern struct {
     height: u32,
 };
 
-pub fn init(allocator: std.mem.Allocator, size: u32, format: Format) !Self {
+pub fn init(allocator: std.mem.Allocator, format: Format) !Self {
+    const size = grow_size;
     var self = Self{
         .allocator = allocator,
         .data = try allocator.alloc(u8, size * size * format.depth()),
@@ -127,7 +127,7 @@ pub fn clear(self: *Self) void {
 pub fn put(self: *Self, width: u32, height: u32, data: []const u8) !Region {
     const region = self.reserve(width, height) catch |e| blk: {
         if (e == .AtlasFull) {
-            try self.grow(self.size + self.original_size);
+            try self.grow(self.size + grow_size);
             break :blk try self.reserve(width, height);
         }
         return e;

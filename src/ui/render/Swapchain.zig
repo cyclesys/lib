@@ -1,4 +1,4 @@
-const vk = @import("vk");
+const vk = @import("vulkan");
 const win = @import("../../windows.zig");
 const fns = @import("fns.zig");
 const Target = @import("Target.zig");
@@ -12,15 +12,7 @@ pub const Error = error{
 };
 const Self = @This();
 
-pub fn init(targets: [2]Target, event: win.HANDLE, mutex: win.HANDLE) Self {
-    return Self{
-        .targets = targets,
-        .event = event,
-        .mutex = mutex,
-    };
-}
-
-pub fn create(
+pub fn init(
     device_fns: anytype,
     device: vk.Device,
     memory_type_index: u32,
@@ -30,7 +22,7 @@ pub fn create(
     height: u32,
 ) Self {
     const targets = [_]Target{
-        try Target.create(
+        try Target.init(
             device_fns,
             device,
             memory_type_index,
@@ -39,7 +31,7 @@ pub fn create(
             width,
             height,
         ),
-        try Target.create(
+        try Target.init(
             device_fns,
             device,
             memory_type_index,

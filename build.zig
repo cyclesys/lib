@@ -6,7 +6,23 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    _ = b.addModule("cycle_lib", .{ .source_file = .{ .path = "src/lib.zig" } });
+    const vulkan_module = try vulkan.vulkanModule(b);
+    const shaders_module = vulkan.shadersModule(b);
+
+    const lib_module = b.addModule("cycle_lib", std.Build.CreateModuleOptions{
+        .source_file = std.Build.LazyPath{ .path = "src/lib.zig" },
+        .dependencies = &[_]std.Build.ModuleDependency{
+            std.Build.ModuleDependency{
+                .name = "vulkan",
+                .module = vulkan_module,
+            },
+            std.Build.ModuleDependency{
+                .name = "shaders",
+                .module = shaders_module,
+            },
+        },
+    });
+    _ = lib_module;
 
     const mach_freetype_dep = b.dependency("mach_freetype", .{
         .target = target,
@@ -24,7 +40,8 @@ pub fn build(b: *std.Build) !void {
     mach_freetype.linkHarfbuzz(mach_freetype_dep.builder, lib_tests);
 
     lib_tests.addModule("known_folders", b.dependency("known_folders", .{}).module("known-folders"));
-    lib_tests.addModule("vulkan", try vulkan.module(b));
+    lib_tests.addModule("vulkan", vulkan_module);
+    lib_tests.addModule("shaders", shaders_module);
 
     const run_tests = b.addRunArtifact(lib_tests);
     const run_tests_step = b.step("test", "Run tests");

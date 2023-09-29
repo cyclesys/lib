@@ -3,21 +3,16 @@ const tree = @import("../tree.zig");
 const FontCache = @import("../text/FontCache.zig");
 const GlyphCache = @import("../text/GlyphCache.zig");
 const nodes = @import("nodes.zig");
+const Pipeline = @import("Pipeline.zig");
 
 allocator: std.mem.Allocator,
-vertices: []const Vertex,
+vertices: []const Pipeline.Vertex,
 indices: []const u32,
 
-pub const Vertex = extern struct {
-    pos: [2]f32,
-    color: [4]f32,
-    is_glyph: bool,
-    glyph: [2]u32,
-};
 const Self = @This();
 
 const State = struct {
-    vertices: std.ArrayList(Vertex),
+    vertices: std.ArrayList(Pipeline.Vertex),
     indices: std.ArrayList(u32),
     fonts: *FontCache,
     glyphs: *GlyphCache,
@@ -30,7 +25,7 @@ pub fn create(
     render_tree: anytype,
 ) !Self {
     var state = State{
-        .vertices = std.ArrayList(Vertex).init(allocator),
+        .vertices = std.ArrayList(Pipeline.Vertex).init(allocator),
         .indices = std.ArrayList(u32).init(allocator),
         .fonts = fonts,
         .glyphs = glyphs,
@@ -67,7 +62,7 @@ fn addNode(state: *State, node: anytype) !void {
     const Node = @TypeOf(node);
     switch (Node.id) {
         .Rect => {
-            try addQuad(state, node.offset, node.info.color, false, [_]u32{ 0, 0 });
+            try addQuad(state, node.offset, node.info.color, [_]u32{ 0, 0, 0 });
             if (Node.Child != void) {
                 try addRenderTree(state, node.child);
             }
@@ -103,8 +98,8 @@ fn addText(state: *State, offset: tree.Offset, text: nodes.RenderText) !void {
                 .height = atlas_region.height,
             },
             text.color,
-            true,
             [_]u32{
+                1,
                 glyph_x,
                 glyph_y,
             },
@@ -117,7 +112,6 @@ fn addQuad(
     offset: tree.Offset,
     size: tree.Size,
     color: nodes.Color,
-    is_glyph: bool,
     glyph: [2]u32,
 ) !void {
     const top_left_index = state.vertices.items.len;
@@ -128,31 +122,27 @@ fn addQuad(
     try state.vertices.ensureUnusedCapacity(4);
     try state.vertices.appendSliceAssumeCapacity(&.{
         // top-left
-        Vertex{
+        Pipeline.Vertex{
             .pos = [_]f32{ offset.x, offset.y },
             .color = color,
-            .is_glyph = is_glyph,
             .glyph = glyph,
         },
         // top-right
-        Vertex{
+        Pipeline.Vertex{
             .pos = [_]f32{ offset.x + size.width, offset.y },
             .color = color,
-            .is_glyph = is_glyph,
             .glyph = glyph,
         },
         // bottom-right
-        Vertex{
+        Pipeline.Vertex{
             .pos = [_]f32{ offset.x + size.width, offset.y + size.height },
             .color = color,
-            .is_glyph = is_glyph,
             .glyph = glyph,
         },
         // bottom-left
-        Vertex{
+        Pipeline.Vertex{
             .pos = [_]f32{ offset.x, offset.y + size.height },
             .color = color,
-            .is_glyph = is_glyph,
             .glyph = glyph,
         },
     });
