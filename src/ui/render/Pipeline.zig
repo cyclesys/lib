@@ -3,9 +3,13 @@ const shaders = @import("shaders");
 const Buffer = @import("Buffer.zig");
 const Context = @import("Context.zig");
 
+destripctor_pool: vk.DescriptorPool,
 descriptor_set_layout: vk.DescriptorSetLayout,
-pipeline_layout: vk.PipelineLayout,
+descriptor_set: vk.DescriptorSet,
+
 render_pass: vk.RenderPass,
+
+pipeline_layout: vk.PipelineLayout,
 pipeline: vk.Pipeline,
 
 pub const Vertex = extern struct {
@@ -17,32 +21,104 @@ pub const Vertex = extern struct {
     pub const Color = [4]f32;
     pub const Glyph = [3]u32;
 };
+pub const Gamma = f32;
 const Self = @This();
 
 pub fn init(context: *const Context) !Self {
-    const descriptor_set_layout, const pipeline_layout = try createLayouts(context);
+    const descriptor_pool, const descriptor_set_layout, const descriptor_set = try createDescriptorSet(context);
     const render_pass = try createRenderPass(context);
-    const pipeline = try createPipeline(context, pipeline_layout, render_pass);
+    const pipeline_layout, const pipeline = try createPipeline(context, descriptor_set_layout, render_pass);
     return Self{
+        .descriptor_pool = descriptor_pool,
         .descriptor_set_layout = descriptor_set_layout,
-        .pipeline_Layout = pipeline_layout,
+        .descriptor_set = descriptor_set,
         .render_pass = render_pass,
+        .pipeline_layout = pipeline_layout,
         .pipeline = pipeline,
     };
 }
 
 pub fn deinit(self: *Self, context: *const Context) void {
     context.device_fns.destroyPipeline(context.device, self.pipeline, null);
-    context.device_fns.destroyRenderPass(context.device, self.render_pass, null);
     context.device_fns.destroyPipelineLayout(context.device, self.pipeline_layout, null);
+    context.device_fns.destroyRenderPass(context.device, self.render_pass, null);
+    context.device_fns.freeDescriptorSets(context.device, self.descriptor_pool, 1, &self.descriptor_set);
     context.device_fns.destroyDescriptorSetLayout(context.device, self.descriptor_set_layout, null);
+    context.device_fns.destroyDescriptorPool(context.device, self.descriptor_pool, null);
 }
 
-fn createLayouts(context: *const Context) !struct {
+pub fn setGamma(self: *const Self, context: *const Context, buffer: vk.Buffer) void {
+    context.device_fns.updateDescriptorSets(
+        context.device,
+        1,
+        &vk.WriteDescriptorSet{
+            .dst_set = self.descriptor_set,
+            .dst_binding = 0,
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .uniform_buffer,
+            .p_image_info = undefined,
+            .p_buffer_info = &vk.DescriptorBufferInfo{
+                .buffer = buffer,
+                .offset = 0,
+                .range = @sizeOf(Gamma),
+            },
+            .p_texel_buffer_view = undefined,
+        },
+        0,
+        null,
+    );
+}
+
+pub fn setAtlas(self: *const Self, context: *const Context, sampler: vk.Sampler, image_view: vk.ImageView) void {
+    context.device_fns.updateDescriptorSets(
+        context.device,
+        1,
+        &vk.WriteDescriptorSet{
+            .dst_set = self.descriptor_set,
+            .dst_binding = 1,
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .combined_image_sampler,
+            .p_image_info = &vk.DescriptorImageInfo{
+                .sampler = sampler,
+                .image_view = image_view,
+                .image_layout = .shader_read_only_optimal,
+            },
+            .p_buffer_info = undefined,
+            .p_texel_buffer_view = undefined,
+        },
+        0,
+        null,
+    );
+}
+
+fn createDescriptorSet(context: *const Context) !struct {
+    vk.DescriptorPool,
     vk.DescriptorSetLayout,
-    vk.PipelineLayout,
+    vk.DescriptorSet,
 } {
-    const descriptor_set_bindings = [_]vk.DescriptorSetLayoutBinding{
+    const pool_sizes = [_]vk.DescriptorPoolSize{
+        vk.DescriptorPoolSize{
+            .type = .uniform_buffer,
+            .descriptor_count = 1,
+        },
+        vk.DescriptorPoolSize{
+            .type = .combined_image_sampler,
+            .descriptor_count = 1,
+        },
+    };
+    const pool = try context.device_fns.createDescriptorPool(
+        context.device,
+        &vk.DescriptorPoolCreateInfo{
+            .max_sets = 1,
+            .pool_size_count = pool_sizes.len,
+            .p_pool_sizes = &pool_sizes,
+        },
+        null,
+    );
+
+    const bindings = [_]vk.DescriptorSetLayoutBinding{
         vk.DescriptorSetLayoutBinding{
             .binding = 0,
             .descriptor_type = .uniform_buffer,
@@ -56,28 +132,30 @@ fn createLayouts(context: *const Context) !struct {
             .stage_flags = .fragment_bit,
         },
     };
-
-    const descriptor_set_layout = try context.device_fns.createDescriptorSetLayout(
+    const layout = try context.device_fns.createDescriptorSetLayout(
         context.device,
         &vk.DescriptorSetLayoutCreateInfo{
-            .binding_count = descriptor_set_bindings.len,
-            .p_bindings = &descriptor_set_bindings,
+            .binding_count = bindings.len,
+            .p_bindings = &bindings,
         },
         null,
     );
 
-    const pipeline_layout = try context.device_fns.createPipelineLayout(
+    var descriptor_set: vk.DescriptorSet = undefined;
+    try context.device_fns.allocateDescriptorSets(
         context.device,
-        &vk.PipelineLayoutCreateInfo{
-            .set_layout_count = 1,
-            .p_set_layouts = &descriptor_set_layout,
+        &vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = pool,
+            .descriptor_set_count = 1,
+            .p_set_layouts = &layout,
         },
-        null,
+        &descriptor_set,
     );
 
     return .{
-        descriptor_set_layout,
-        pipeline_layout,
+        pool,
+        layout,
+        descriptor_set,
     };
 }
 
@@ -131,7 +209,10 @@ fn createRenderPass(context: *const Context) !vk.RenderPass {
     );
 }
 
-fn createPipeline(context: *const Context, pipeline_layout: vk.PipelineLayout, render_pass: vk.RenderPass) !vk.Pipeline {
+fn createPipeline(context: *const Context, descriptor_set_layout: vk.DescriptorSetLayout, render_pass: vk.RenderPass) !struct {
+    vk.PipelineLayout,
+    vk.Pipeline,
+} {
     const vertex_module = try context.device_fns.createShaderModule(
         context.device,
         &vk.ShaderModuleCreateInfo{
@@ -211,6 +292,15 @@ fn createPipeline(context: *const Context, pipeline_layout: vk.PipelineLayout, r
         .reference = 0,
     };
 
+    const layout = try context.device_fns.createPipelineLayout(
+        context.device,
+        &vk.PipelineLayoutCreateInfo{
+            .set_layout_count = 1,
+            .p_set_layouts = &descriptor_set_layout,
+        },
+        null,
+    );
+
     const create_info = vk.GraphicsPipelineCreateInfo{
         .stage_count = stages.len,
         .p_stages = &stages,
@@ -266,11 +356,14 @@ fn createPipeline(context: *const Context, pipeline_layout: vk.PipelineLayout, r
             .dynamic_state_count = dynamic_states.len,
             .p_dynamic_states = &dynamic_states,
         },
-        .layout = pipeline_layout,
+        .layout = layout,
         .render_pass = render_pass,
         .subpass = 0,
     };
     var pipeline: vk.Pipeline = undefined;
     try context.device_fns.createGraphicsPipelines(context.device, .null_handle, 1, &create_info, null, &pipeline);
-    return pipeline;
+    return .{
+        layout,
+        pipeline,
+    };
 }

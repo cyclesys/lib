@@ -142,3 +142,132 @@ pub fn copyBufferToImage(
         &region,
     );
 }
+
+pub fn beginRenderPass(
+    self: *const Self,
+    context: *const Context,
+    render_pass: vk.RenderPass,
+    framebuffer: vk.Framebuffer,
+    width: u32,
+    height: u32,
+) void {
+    context.device_fns.cmdBeginRenderPass(
+        self.buffer,
+        &vk.RenderPassBeginInfo{
+            .render_pass = render_pass,
+            .framebuffer = framebuffer,
+            .render_area = vk.Rect2D{
+                .offset = vk.Offset2D{
+                    .x = 0,
+                    .y = 0,
+                },
+                .extent = vk.Extent2D{
+                    .width = width,
+                    .height = height,
+                },
+            },
+            .clear_value_count = 1,
+            .p_clear_values = &vk.ClearValue{
+                .color = vk.ClearColorValue{
+                    .float_32 = [_]f32{ 0.0, 0.0, 0.0, 0.0 },
+                },
+            },
+        },
+        .@"inline",
+    );
+}
+
+pub fn endRenderPass(self: *const Self, context: *const Context) void {
+    context.device_fns.cmdEndRenderPass(self.buffer);
+}
+
+pub fn setViewport(self: *const Self, context: *const Context, width: f32, height: f32) void {
+    context.device_fns.cmdSetViewport(
+        self.buffer,
+        0,
+        1,
+        &vk.Viewport{
+            .x = 0.0,
+            .y = 0.0,
+            .width = width,
+            .height = height,
+            .min_depth = 1.0,
+            .max_depth = 1.0,
+        },
+    );
+}
+
+pub fn setScissor(self: *const Self, context: *const Context, width: u32, height: u32) void {
+    context.device_fns.cmdSetScissor(
+        self.buffer,
+        0,
+        1,
+        &vk.Rect2D{
+            .offset = vk.Offset2D{
+                .x = 0,
+                .y = 0,
+            },
+            .extent = vk.Extent2D{
+                .width = width,
+                .height = height,
+            },
+        },
+    );
+}
+
+pub fn bindDescriptorSet(
+    self: *const Self,
+    context: *const Context,
+    layout: vk.PipelineLayout,
+    descriptor_set: vk.DescriptorSet,
+) void {
+    context.device_fns.cmdBindDescriptorSets(
+        self.buffer,
+        .graphics,
+        layout,
+        0,
+        1,
+        &descriptor_set,
+        0,
+        null,
+    );
+}
+
+pub fn bindGraphicsPipeline(self: *const Self, context: *const Context, pipeline: vk.Pipeline) void {
+    context.device_fns.cmdBindPipeline(
+        self.buffer,
+        .graphics,
+        pipeline,
+    );
+}
+
+pub fn bindVertexBuffer(self: *const Self, context: *const Context, buffer: vk.Buffer) void {
+    const offset: vk.DeviceSize = 0;
+    context.device_fns.cmdBindVertexBuffers(
+        self.buffer,
+        0,
+        1,
+        &buffer,
+        &offset,
+    );
+}
+
+pub fn bindIndexBuffer(self: *const Self, context: *const Context, buffer: vk.Buffer) void {
+    context.device_fns.cmdBindIndexBuffer(
+        self.buffer,
+        buffer,
+        0,
+        .uint32,
+    );
+}
+
+pub fn drawIndexed(self: *const Self, context: *const Context, index_count: u32) void {
+    context.device_fns.cmdDrawIndexed(
+        self.buffer,
+        index_count,
+        1,
+        0,
+        0,
+        0,
+    );
+}

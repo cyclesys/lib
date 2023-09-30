@@ -8,13 +8,13 @@ instance: vk.Instance,
 instance_fns: InstanceFns,
 
 physical_device: vk.PhysicalDevice,
+physical_device_properties: vk.PhysicalDeviceProperties,
+queue_family_index: u32,
 host_visible_memory_index: u32,
 device_local_memory_index: u32,
 
 device: vk.Device,
 device_fns: DeviceFns,
-
-queue_family_index: u32,
 
 pub const AppVersion = struct {
     variant: u32,
@@ -48,7 +48,7 @@ pub fn init(
     );
     const instance_fns = try InstanceFns.load(instance, loader);
 
-    const physical_device, const physical_device_memory_properties, const queue_family_index = try findPhysicalDevice(allocator, instance_fns, instance, dev_uuid);
+    const physical_device, const physical_device_properties, const physical_device_memory_properties, const queue_family_index = try findPhysicalDevice(allocator, instance_fns, instance, dev_uuid);
 
     const host_visible_memory_index = try findMemoryTypeIndex(physical_device_memory_properties, true);
     const device_local_memory_index = try findMemoryTypeIndex(physical_device_memory_properties, false);
@@ -61,11 +61,12 @@ pub fn init(
         .instance = instance,
         .instance_fns = instance_fns,
         .physical_device = physical_device,
+        .physical_device_properties = physical_device_properties,
+        .queue_family_index = queue_family_index,
         .host_visible_memory_index = host_visible_memory_index,
         .device_local_memory_index = device_local_memory_index,
         .device = device,
         .device_fns = device_fns,
-        .queue_family_index = queue_family_index,
     };
 }
 
@@ -112,6 +113,7 @@ fn findPhysicalDevice(
     uuid: DeviceId,
 ) !struct {
     vk.PhysicalDevice,
+    vk.PhysicalDeviceProperties,
     vk.PhysicalDeviceMemoryProperties,
     u32,
 } {
@@ -147,6 +149,7 @@ fn findPhysicalDevice(
 
             return .{
                 device,
+                properties,
                 memory_properties,
                 queue_family_index,
             };
@@ -189,6 +192,9 @@ fn createDevice(
         &vk.DeviceCreateInfo{
             .queue_create_info_count = queue_create_infos.len,
             .p_queue_create_infos = &queue_create_infos,
+            .p_enabled_features = &vk.PhysicalDeviceFeatures{
+                .sampler_anisotropy = vk.TRUE,
+            },
         },
         null,
     );
@@ -198,12 +204,13 @@ fn createDevice(
 
 pub const BaseFns = vk.BaseWrapper(.{
     .createInstance = true,
+    .enumerateInstanceExtensionProperties = true,
 });
 
 pub const InstanceFns = vk.InstanceWrapper(.{
+    .destroyInstance = true,
     .createDevice = true,
     .createDebugUtilsMessengerEXT = true,
-    .destroyInstance = true,
     .destroySurfaceKHR = true,
 });
 
@@ -235,6 +242,13 @@ pub const DeviceFns = vk.DeviceWrapper(.{
 
     .cmdBeginRenderPass = true,
     .cmdEndRenderPass = true,
+
+    .createDescriptorPool = true,
+    .destroyDescriptorPool = true,
+
+    .allocateDescriptorSets = true,
+    .freeDescriptorSets = true,
+    .updateDescriptorSets = true,
 
     .createDescriptorSetLayout = true,
     .destroyDescriptorSetLayout = true,

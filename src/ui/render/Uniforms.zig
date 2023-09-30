@@ -2,16 +2,18 @@ const vk = @import("vulkan");
 const Buffer = @import("Buffer.zig");
 const Commands = @import("Commands.zig");
 const Context = @import("Context.zig");
+const Pipeline = @import("Pipeline.zig");
 
 gamma: Buffer,
 atlas: Atlas,
 
 pub const Atlas = struct {
     size: u32,
-    initialized: bool,
+    set: bool,
     image: vk.Image,
     view: vk.ImageView,
     memory: vk.DeviceMemory,
+    sampler: vk.Sampler,
 };
 const Self = @This();
 
@@ -19,7 +21,7 @@ pub fn init(context: *const Context, atlas_size: u32) !Self {
     return Self{
         .gamma = try Buffer.init(
             context,
-            @sizeOf(f32),
+            @sizeOf(Pipeline.Gamma),
             vk.BufferUsageFlags{
                 .uniform_buffer_bit = true,
                 .transfer_dst_bit = true,
@@ -35,10 +37,10 @@ pub fn deinit(self: *const Self, context: *const Context) void {
     self.gamma.deinit(context);
 }
 
-pub fn setGamma(self: *const Self, context: *const Context, commands: *const Commands, gamma: f32) !void {
+pub fn setGamma(self: *const Self, context: *const Context, commands: *const Commands, gamma: Pipeline.Gamma) !void {
     const staging = try Buffer.init(
         context,
-        @sizeOf(f32),
+        @sizeOf(Pipeline.Gamma),
         vk.BufferUsageFlags{ .transfer_src_bit = true },
         true,
     );
@@ -46,7 +48,7 @@ pub fn setGamma(self: *const Self, context: *const Context, commands: *const Com
 
     var bytes: []const u8 = undefined;
     bytes.ptr = @ptrCast(&gamma);
-    bytes.len = @sizeOf(f32);
+    bytes.len = @sizeOf(Pipeline.Gamma);
 
     try staging.copy(context, bytes);
     try staging.bind();
@@ -59,7 +61,7 @@ pub fn setGamma(self: *const Self, context: *const Context, commands: *const Com
         vk.BufferCopy{
             .src_offset = 0,
             .dst_offset = 0,
-            .size = @sizeOf(f32),
+            .size = @sizeOf(Pipeline.Gamma),
         },
     );
     try commands.submit(context);
@@ -85,19 +87,22 @@ pub fn setAtlas(self: *const Self, context: *const Context, commands: *const Com
     try commands.begin(context);
     commands.pipelineImageBarrier(
         context,
-        if (self.atlas.initialized)
+        if (self.atlas.set)
             vk.PipelineStageFlags{ .fragment_shader_bit = true }
         else
             vk.PipelineStageFlags{ .host_bit = true },
         vk.PipelineStageFlags{ .transfer_bit = true },
         vk.DependencyFlags{},
         vk.ImageMemoryBarrier{
-            .src_access_mask = if (self.atlas.initialized)
+            .src_access_mask = if (self.atlas.set)
                 vk.AccessFlags{ .shader_read_bit = true }
             else
                 vk.AccessFlags{ .undefined = true },
             .dst_access_mask = vk.AccessFlags{ .transfer_write_bit = true },
-            .old_layout = .undefined,
+            .old_layout = if (self.atlas.set)
+                .shader_read_only_optimal
+            else
+                .undefined,
             .new_layout = .transfer_dst_optimal,
             .src_queue_family_index = 0,
             .dst_queue_family_index = 0,
@@ -147,7 +152,7 @@ pub fn setAtlas(self: *const Self, context: *const Context, commands: *const Com
             .src_access_mask = vk.AccessFlags{ .transfer_write_bit = true },
             .dst_access_mask = vk.AccessFlags{ .shader_read_bit = true },
             .old_layout = .transfer_dst_optimal,
-            .new_layout = .read_only_optimal,
+            .new_layout = .shader_read_only_optimal,
             .src_queue_family_index = 0,
             .dst_queue_family_index = 0,
             .image = self.atlas.image,
@@ -161,6 +166,7 @@ pub fn setAtlas(self: *const Self, context: *const Context, commands: *const Com
         },
     );
     try commands.submit(context);
+    self.atlas.set = true;
 }
 
 fn initAtlas(context: *const Context, size: u32) !Atlas {
@@ -220,15 +226,39 @@ fn initAtlas(context: *const Context, size: u32) !Atlas {
         null,
     );
     try context.device_fns.bindImageMemory(context.device, image, memory, 0);
+    const sampler = try context.device_fns.createSampler(
+        context.device,
+        &vk.SamplerCreateInfo{
+            .mag_filter = .linear,
+            .min_filter = .linear,
+            .mipmap_mode = .linear,
+            .address_mode_u = .clamp_to_border,
+            .address_mode_v = .clamp_to_border,
+            .address_mode_w = .clamp_to_border,
+            .mip_lod_bias = 0.0,
+            .anisotropy_enable = vk.TRUE,
+            .max_anisotropy = context.physical_device_properties.limits.maxSamplerAnisotropy,
+            .compare_enable = vk.FALSE,
+            .compare_op = .never,
+            .min_lod = 0.0,
+            .max_lod = 0.0,
+            .border_color = .int_opaque_black,
+            .unnormalized_coordinates = vk.TRUE,
+        },
+        null,
+    );
     return Atlas{
         .size = size,
+        .set = false,
         .image = image,
         .view = view,
         .memory = memory,
+        .sampler = sampler,
     };
 }
 
 fn deinitAtlas(atlas: Atlas, context: *const Context) void {
+    context.device_fns.destroySampler(context.device, atlas.sampler, null);
     context.device_fns.destroyImageView(context.device, atlas.view, null);
     context.device_fns.destroyImage(context.device, atlas.image, null);
     context.device_fns.freeMemory(context.device, atlas.memory, null);

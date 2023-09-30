@@ -6,6 +6,8 @@ const Target = @import("Target.zig");
 targets: [2]Target,
 event: win.HANDLE,
 mutex: win.HANDLE,
+width: u32,
+height: u32,
 
 pub const Error = error{
     SwapchainInvalid,
@@ -56,6 +58,8 @@ pub fn init(
         .targets = targets,
         .event = event,
         .mutex = mutex,
+        .width = width,
+        .height = height,
     };
 }
 
