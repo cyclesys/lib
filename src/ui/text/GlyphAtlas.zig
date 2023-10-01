@@ -73,8 +73,6 @@ pub const Error = error{
 };
 const Self = @This();
 
-const grow_size = 128;
-
 /// A region within the texture atlas. These can be acquired using the
 /// "reserve" function. A region reservation is required to write data.
 pub const Region = extern struct {
@@ -83,14 +81,13 @@ pub const Region = extern struct {
     width: u32,
     height: u32,
 };
+pub const grow_size = 128;
 
-pub fn init(allocator: std.mem.Allocator, format: Format) !Self {
-    const size = grow_size;
+pub fn init(allocator: std.mem.Allocator, size: u32, format: Format) !Self {
     var self = Self{
         .allocator = allocator,
         .data = try allocator.alloc(u8, size * size * format.depth()),
         .size = size,
-        .original_size = size,
         .nodes = std.ArrayList(Node).init(allocator),
         .format = format,
     };

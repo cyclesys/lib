@@ -21,7 +21,7 @@ pub fn init(allocator: std.mem.Allocator) !Self {
     return Self{
         .allocator = allocator,
         .regions = std.AutoHashMap(Key, GlyphAtlas.Region).init(allocator),
-        .atlas = try GlyphAtlas.init(allocator, .greyscale),
+        .atlas = try GlyphAtlas.init(allocator, GlyphAtlas.grow_size, .greyscale),
     };
 }
 
