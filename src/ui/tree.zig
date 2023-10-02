@@ -430,9 +430,9 @@ pub fn LayoutChild(comptime Child: type) type {
         pub fn layout(self: Self, constraints: Constraints) !Size {
             if (Node != void) {
                 return if (Node.kind == .Info)
-                    try build(self.allocator, self.node.child, self.state, constraints)
+                    try buildNode(self.allocator, self.node.child, self.state, constraints)
                 else
-                    try build(self.allocator, self.node, self.state, constraints);
+                    try buildNode(self.allocator, self.node, self.state, constraints);
             }
         }
 
@@ -649,7 +649,7 @@ fn BuildState(comptime Node: type) type {
     };
 }
 
-pub fn render(
+pub fn build(
     allocator: std.mem.Allocator,
     tree: ?Tree,
     constraints: Constraints,
@@ -668,7 +668,7 @@ pub fn render(
     }
 
     var render_state: RenderTree(Node) = undefined;
-    const size = try build(
+    const size = try buildNode(
         allocator,
         node,
         .{
@@ -684,7 +684,7 @@ pub fn render(
     return state.tree();
 }
 
-fn build(
+fn buildNode(
     allocator: std.mem.Allocator,
     node: anytype,
     state: BuildState(@TypeOf(node)),
@@ -746,7 +746,7 @@ fn buildBuild(
     if (ChildNode != void) {
         child_build = &state.build.child;
     }
-    const size = try build(
+    const size = try buildNode(
         allocator,
         child,
         .{
@@ -773,7 +773,7 @@ fn buildInput(
         child_input = &state.input.child;
     }
 
-    const size = try build(
+    const size = try buildNode(
         allocator,
         node.child,
         .{
@@ -1012,7 +1012,7 @@ fn buildRender(
             child_render = &state.render.child;
         }
 
-        const size = try build(
+        const size = try buildNode(
             allocator,
             node.child,
             .{

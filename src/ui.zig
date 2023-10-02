@@ -1,5 +1,9 @@
 pub usingnamespace @import("ui/nodes.zig");
 
+pub const render = struct {
+    pub const vulkanLoader = @import("ui/render/Context.zig").vulkanLoader;
+};
+
 const tree = @import("ui/tree.zig");
 pub const Tree = tree.Tree;
 pub const Constraints = tree.Constraints;
@@ -19,7 +23,7 @@ pub const SlottedLayoutChildren = tree.SlottedLayoutChildren;
 pub const IterableLayoutChildren = tree.IterableLayoutChildren;
 pub const LayoutChild = tree.LayoutChild;
 pub const initNode = tree.initNode;
-pub const render = tree.render;
+pub const build = tree.build;
 
 test {
     _ = @import("ui/text/bidi.zig");
