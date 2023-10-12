@@ -3,7 +3,16 @@ const std = @import("std");
 pub fn View(comptime Type: type) type {
     return switch (@typeInfo(Type)) {
         .Void, .Bool, .Int, .Float, .Enum => Type,
-        .Pointer => SliceView(Type),
+        .Pointer => |info| blk: {
+            if (info.size != .Slice) {
+                @compileError("unsupported pointer type");
+            }
+
+            break :blk if (info.child == u8)
+                []const u8
+            else
+                SliceView(Type);
+        },
         .Array => ArrayView(Type),
         .Struct => StructView(Type),
         .Optional => |info| ?View(info.child),
@@ -16,13 +25,7 @@ fn SliceView(comptime Type: type) type {
     return struct {
         bytes: []const u8,
 
-        const Element = blk: {
-            const info = @typeInfo(Type).Pointer;
-            if (info.size != .Slice) {
-                @compileError("unsupported pointer type");
-            }
-            break :blk info.child;
-        };
+        const Element = @typeInfo(Type).Pointer.child;
         const Self = @This();
 
         pub fn len(self: Self) usize {
@@ -140,9 +143,12 @@ pub fn read(comptime Type: type, bytes: []const u8) View(Type) {
         .Bool => bytes[0] == 1,
         .Int, .Float => readPacked(Type, bytes),
         .Pointer => |info| switch (info.size) {
-            .Slice => SliceView(Type){
-                .bytes = bytes,
-            },
+            .Slice => if (info.child == u8)
+                readByteSlice(bytes)
+            else
+                SliceView(Type){
+                    .bytes = bytes,
+                },
             else => @compileError("unsupported pointer type"),
         },
         .Array => ArrayView(Type){
@@ -161,6 +167,13 @@ pub fn read(comptime Type: type, bytes: []const u8) View(Type) {
         },
         else => @compileError("unsupported"),
     };
+}
+
+fn readByteSlice(bytes: []const u8) []const u8 {
+    var slice: []const u8 = undefined;
+    slice.len = readPacked(usize, bytes);
+    slice.ptr = @ptrCast(&bytes[@sizeOf(usize)]);
+    return slice;
 }
 
 fn readElem(comptime Element: type, len: usize, index: usize, bytes: []const u8) View(Element) {
@@ -475,15 +488,15 @@ test "struct with slices" {
     }
     try std.testing.expectEqual(value.f4.f0, result.view.field(.f4).field(.f0));
     for (value.f4.f1, 0..) |val, i| {
-        try std.testing.expectEqual(val, result.view.field(.f4).field(.f1).elem(i));
+        try std.testing.expectEqual(val, result.view.field(.f4).field(.f1)[i]);
     }
     try std.testing.expectEqual(value.f4.f2, result.view.field(.f4).field(.f2));
     try std.testing.expectEqual(value.f4.f3.len, result.view.field(.f4).field(.f3).len());
     for (value.f4.f3, 0..) |val, i| {
         const result_inner = result.view.field(.f4).field(.f3).elem(i);
-        try std.testing.expectEqual(val.f0.len, result_inner.field(.f0).len());
+        try std.testing.expectEqual(val.f0.len, result_inner.field(.f0).len);
         for (val.f0, 0..) |val2, ii| {
-            try std.testing.expectEqual(val2, result_inner.field(.f0).elem(ii));
+            try std.testing.expectEqual(val2, result_inner.field(.f0)[ii]);
         }
     }
 }

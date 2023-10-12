@@ -1,22 +1,20 @@
 const std = @import("std");
-const windows = @import("windows.zig");
+const win = @import("windows.zig");
 
-const serde = @import("serde.zig");
+const serde = @import("channel/serde.zig");
 const SharedMem = @import("SharedMem.zig");
-
-const ByteList = std.ArrayList(u8);
 
 pub fn Reader(comptime Message: type) type {
     return struct {
         chan: Channel,
-        buf: ByteList,
+        buf: std.ArrayList(u8),
 
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator, channel: Channel) Self {
             return Self{
                 .chan = channel,
-                .buf = ByteList.init(allocator),
+                .buf = std.ArrayList(u8).init(allocator),
             };
         }
 
@@ -24,23 +22,20 @@ pub fn Reader(comptime Message: type) type {
             self.buf.deinit();
         }
 
-        pub fn read(self: *Self) !Message {
+        pub fn read(self: *Self) !serde.View(Message) {
             const msg = try self.readImpl(null);
             return msg.?;
         }
 
-        pub fn readFor(self: *Self, timeout: u32) !?Message {
+        pub fn readFor(self: *Self, timeout: u32) !?serde.View(Message) {
             return self.readImpl(timeout);
         }
 
-        fn readImpl(
-            self: *Self,
-            timeout: anytype,
-        ) !?Message {
+        fn readImpl(self: *Self, timeout: anytype) !?serde.View(Message) {
             if (!try self.chan.read(&self.buf, timeout)) {
                 return null;
             }
-            return try serde.deserialize(Message, self.buf.items);
+            return serde.read(Message, self.buf.items);
         }
     };
 }
@@ -48,14 +43,14 @@ pub fn Reader(comptime Message: type) type {
 pub fn Writer(comptime Message: type) type {
     return struct {
         chan: Channel,
-        buf: ByteList,
+        buf: std.ArrayList(u8),
 
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator, channel: Channel) Self {
             return Self{
                 .chan = channel,
-                .buf = ByteList.init(allocator),
+                .buf = std.ArrayList(u8).init(allocator),
             };
         }
 
@@ -71,21 +66,17 @@ pub fn Writer(comptime Message: type) type {
             return self.writeImpl(msg, timeout);
         }
 
-        fn writeImpl(
-            self: *Self,
-            msg: Message,
-            timeout: anytype,
-        ) !bool {
+        fn writeImpl(self: *Self, msg: Message, timeout: anytype) !bool {
             self.buf.clearRetainingCapacity();
-            try serde.serialize(msg, self.buf.writer());
+            try serde.write(msg, &self.buf);
             return self.chan.write(self.buf.items, timeout);
         }
     };
 }
 
 pub const Channel = struct {
-    wait_ev: windows.HANDLE,
-    signal_ev: windows.HANDLE,
+    wait_ev: win.HANDLE,
+    signal_ev: win.HANDLE,
     mem: SharedMem,
     first_wait: bool = true,
 
@@ -94,13 +85,13 @@ pub const Channel = struct {
     const msg_size = size - msg_start;
 
     pub fn init(start_owned: bool) !Channel {
-        const wait_ev = windows.CreateEventW(
+        const wait_ev = win.CreateEventW(
             null,
             1,
             @intCast(@intFromBool(start_owned)),
             null,
         );
-        const signal_ev = windows.CreateEventW(
+        const signal_ev = win.CreateEventW(
             null,
             1,
             @intCast(@intFromBool(!start_owned)),
@@ -120,11 +111,7 @@ pub const Channel = struct {
         };
     }
 
-    pub fn import(
-        wait_ev: windows.HANDLE,
-        signal_ev: windows.HANDLE,
-        file: windows.HANDLE,
-    ) !Channel {
+    pub fn import(wait_ev: win.HANDLE, signal_ev: win.HANDLE, file: win.HANDLE) !Channel {
         const mem = try SharedMem.import(file, size);
         return Channel{
             .wait_ev = wait_ev,
@@ -134,8 +121,8 @@ pub const Channel = struct {
     }
 
     pub fn deinit(self: *Channel) !void {
-        _ = windows.CloseHandle(self.wait_ev);
-        _ = windows.CloseHandle(self.signal_ev);
+        _ = win.CloseHandle(self.wait_ev);
+        _ = win.CloseHandle(self.signal_ev);
         self.mem.deinit();
     }
 
@@ -148,7 +135,7 @@ pub const Channel = struct {
         };
     }
 
-    fn read(self: *Channel, out: *ByteList, timeout: ?u32) !bool {
+    fn read(self: *Channel, out: *std.ArrayList(u8), timeout: ?u32) !bool {
         self.first_wait = true;
         out.clearRetainingCapacity();
 
@@ -158,7 +145,7 @@ pub const Channel = struct {
                 return false;
             }
 
-            const remaining = try serde.deserialize(usize, self.mem.view);
+            const remaining = serde.read(usize, self.mem.view);
             if (first_wait) {
                 try out.ensureTotalCapacity(msg_size + remaining);
             }
@@ -178,8 +165,6 @@ pub const Channel = struct {
         self.first_wait = true;
 
         var remaining = bytes.len;
-        var stream = std.io.fixedBufferStream(self.mem.view);
-        var writer = stream.writer();
 
         var pos: usize = 0;
         while (remaining > msg_size) {
@@ -189,16 +174,10 @@ pub const Channel = struct {
                 return false;
             }
 
-            try serde.serialize(remaining, writer);
-
-            // This does not use `serde.serialize` because `serde.serialize` would serialize the length
-            // of the slice as well as the bytes, which we don't want.
-            //
-            // Instead we use `@memcpy` to copy the bytes directly into the view.
-            @memcpy(self.mem.view[msg_start..], bytes[pos..(pos + msg_size)]);
+            copyPacked(self.mem.view, remaining);
+            @memcpy(self.mem.view[msg_start..], bytes[pos..][0..msg_size]);
 
             pos += msg_size;
-            stream.reset();
 
             try self.signal();
         }
@@ -208,13 +187,8 @@ pub const Channel = struct {
                 return false;
             }
 
-            try serde.serialize(@as(usize, 0), writer);
-
-            // This does not use `serde.serialize` because `serde.serialize` would serialize the length
-            // of the slice as well as the bytes, which we don't want.
-            //
-            // Instead we use `@memcpy` to copy the bytes directly into the view.
-            @memcpy(self.mem.view[msg_start..(msg_start + remaining)], bytes[pos..(pos + remaining)]);
+            copyPacked(self.mem.view, @as(usize, 0));
+            @memcpy(self.mem.view[msg_start..][0..remaining], bytes[pos..][0..remaining]);
 
             try self.signal();
         }
@@ -223,27 +197,35 @@ pub const Channel = struct {
     }
 
     fn wait(self: *Channel, timeout: ?u32) !bool {
-        const wait_for = if (timeout != null and self.first_wait) timeout.? else windows.INFINITE;
+        const wait_for = if (timeout != null and self.first_wait) timeout.? else win.INFINITE;
         self.first_wait = false;
 
-        const result = windows.WaitForSingleObject(self.wait_ev, wait_for);
+        const result = win.WaitForSingleObject(self.wait_ev, wait_for);
         return switch (result) {
-            windows.WAIT_OBJECT_0 => true,
-            windows.WAIT_TIMEOUT => if (timeout == null) false else error.ChannelInvalid,
-            windows.WAIT_ABANDONED => error.ChannelInvalid,
-            windows.WAIT_FAILED => error.ChannelInvalid,
+            win.WAIT_OBJECT_0 => true,
+            win.WAIT_TIMEOUT => if (timeout == null) false else error.ChannelInvalid,
+            win.WAIT_ABANDONED => error.ChannelInvalid,
+            win.WAIT_FAILED => error.ChannelInvalid,
             else => unreachable,
         };
     }
 
     fn signal(self: *Channel) !void {
-        if (windows.ResetEvent(self.wait_ev) == 0 or
-            windows.SetEvent(self.signal_ev) == 0)
+        if (win.ResetEvent(self.wait_ev) == 0 or
+            win.SetEvent(self.signal_ev) == 0)
         {
             return error.ChannelInvalid;
         }
     }
 };
+
+fn copyPacked(dest: []u8, value: anytype) void {
+    const len = @sizeOf(@TypeOf(value));
+    var source: []const u8 = undefined;
+    source.ptr = @ptrCast(&value);
+    source.len = len;
+    @memcpy(dest[0..len], source);
+}
 
 const testing = std.testing;
 const StrMessage = struct {
@@ -259,11 +241,13 @@ const Child = struct {
         while (true) {
             const msg = try self.reader.read();
 
-            if (msg.str == null) {
+            if (msg.field(.str) == null) {
                 break;
             }
 
-            try self.writer.write(msg);
+            try self.writer.write(StrMessage{
+                .str = msg.field(.str),
+            });
         }
 
         self.reader.deinit();
@@ -294,7 +278,7 @@ test "channel io without timeout" {
         try writer.write(StrMessage{ .str = str });
         if (str != null) {
             const msg = try reader.read();
-            try testing.expectEqualDeep(str, msg.str);
+            try testing.expectEqualDeep(str, msg.field(.str));
         }
     }
 
