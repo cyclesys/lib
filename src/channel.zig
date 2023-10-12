@@ -159,7 +159,6 @@ pub const Channel = struct {
             }
 
             const remaining = try serde.deserialize(usize, self.mem.view);
-
             if (first_wait) {
                 try out.ensureTotalCapacity(msg_size + remaining);
             }
@@ -271,6 +270,10 @@ const Child = struct {
         self.writer.deinit();
     }
 };
+
+test {
+    _ = @import("channel/serde.zig");
+}
 
 test "channel io without timeout" {
     var reader = MessageReader.init(testing.allocator, try Channel.init(false));
