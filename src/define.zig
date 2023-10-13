@@ -50,7 +50,7 @@ pub fn Scheme(comptime scheme_name: []const u8, comptime scheme_types: anytype) 
         switch (Type.def_kind) {
             .object => checkObject(Type.versions, scheme_types),
             .function => checkFunction(Type.versions),
-            .command => checkCommandField(Type.field, false),
+            .command => checkCommandType(Type.cmd_type),
             else => unreachable,
         }
     }
@@ -99,11 +99,11 @@ pub fn Function(comptime function_name: []const u8, comptime function_versions: 
     };
 }
 
-pub fn Command(comptime command_name: []const u8, comptime Field: type) type {
+pub fn Command(comptime command_name: []const u8, comptime Type: type) type {
     return struct {
         pub const def_kind = DefKind.command;
         pub const name = command_name;
-        pub const field = Field;
+        pub const cmd_type = Type;
     };
 }
 
@@ -261,17 +261,16 @@ fn checkField(
     }
 }
 
-fn checkCommandField(comptime Field: type, comptime allow_void: bool) void {
+fn checkCommandType(comptime Field: type) void {
     switch (@typeInfo(Field)) {
-        .Void => if (!allow_void) @compileError("void not allowed here"),
         .Struct => |info| {
             if (@hasDecl(Field, "def_kind")) {
                 switch (Field.def_kind) {
                     .array => {
-                        checkCommandField(Field.child, false);
+                        checkCommandType(Field.child);
                     },
                     .list => {
-                        checkCommandField(Field.child, false);
+                        checkCommandType(Field.child);
                     },
                     .ref => {
                         checkRef(Field);
@@ -282,7 +281,7 @@ fn checkCommandField(comptime Field: type, comptime allow_void: bool) void {
                 }
             } else {
                 for (info.fields) |field| {
-                    checkCommandField(field.type, false);
+                    checkCommandType(field.type);
                 }
             }
         },
@@ -292,7 +291,8 @@ fn checkCommandField(comptime Field: type, comptime allow_void: bool) void {
             }
 
             for (info.fields) |field| {
-                checkCommandField(field.type, true);
+                if (field.type == void) continue;
+                checkCommandType(field.type);
             }
         },
         else => @compileError("invalid `Command` field"),

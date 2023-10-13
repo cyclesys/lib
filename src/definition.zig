@@ -8,102 +8,37 @@ pub const CommandScheme = struct {
 
     pub const Command = struct {
         name: []const u8,
-        field: CommandFieldType,
+        type: Type,
 
-        const CommandFieldType = union(enum) {
-            Ref: Ref,
-            Array: Array,
-            List: *const CommandFieldType,
-            Struct: []const StructField,
-            Union: []const UnionField,
-
-            pub const StructField = struct {
-                name: []const u8,
-                type: CommandFieldType,
+        fn from(comptime T: type) Command {
+            return comptime blk: {
+                const t = Type.from(T.cmd_type);
+                checkCommandType(t);
+                break :blk Command{
+                    .name = T.name,
+                    .type = t.?,
+                };
             };
+        }
 
-            pub const UnionField = struct {
-                name: []const u8,
-                type: ?CommandFieldType,
-            };
-
-            pub const Array = struct {
-                len: usize,
-                child: *const CommandFieldType,
-            };
-
-            fn from(comptime Type: type) CommandFieldType {
-                switch (@typeInfo(Type)) {
-                    .Struct => |info| {
-                        if (!@hasDecl(Type, "def_kind")) {
-                            const result = comptime blk: {
-                                var fields: [info.fields.len]StructField = undefined;
-                                for (info.fields, 0..) |field, i| {
-                                    fields[i] = .{
-                                        .name = field.name,
-                                        .type = CommandFieldType.from(field.type),
-                                    };
-                                }
-                                break :blk CommandFieldType{
-                                    .Struct = fields[0..],
-                                };
-                            };
-                            return result;
-                        }
-
-                        switch (Type.def_kind) {
-                            .array => {
-                                const result = comptime blk: {
-                                    const child = CommandFieldType.from(Type.child);
-                                    break :blk CommandFieldType{
-                                        .Array = Array{
-                                            .len = Type.len,
-                                            .child = &child,
-                                        },
-                                    };
-                                };
-                                return result;
-                            },
-                            .list => {
-                                const result = comptime blk: {
-                                    const child = CommandFieldType.from(Type.child);
-                                    break :blk CommandFieldType{
-                                        .List = &child,
-                                    };
-                                };
-                                return result;
-                            },
-                            .ref => return CommandFieldType{
-                                .Ref = Ref.from(Type),
-                            },
-                            else => @compileError("unexpected command field type"),
-                        }
-                    },
-                    .Union => |info| {
-                        const result = comptime blk: {
-                            var fields: [info.fields.len]UnionField = undefined;
-                            for (info.fields, 0..) |field, i| {
-                                fields[i] = .{
-                                    .name = field.name,
-                                    .type = if (field.type == void) null else CommandFieldType.from(field.type),
-                                };
-                            }
-                            break :blk CommandFieldType{
-                                .Union = fields[0..],
-                            };
-                        };
-                        return result;
-                    },
-                    else => @compileError("unexpected command field type"),
-                }
+        fn checkCommandType(comptime t: ?Type) void {
+            if (t == null) {
+                @compileError("command type cannot be Ignore");
             }
-        };
 
-        fn from(comptime Type: type) Command {
-            return Command{
-                .name = Type.name,
-                .field = CommandFieldType.from(Type.field),
-            };
+            switch (t.?) {
+                .Array => |info| checkCommandType(info.child.*),
+                .List => |info| checkCommandType(info.child.*),
+                .Struct => |info| for (info.fields) |f| {
+                    checkCommandType(f.type);
+                },
+                .Union => |info| for (info.fields) |f| {
+                    if (f.type == .Void) continue;
+                    checkCommandType(f.type);
+                },
+                .Ref => {},
+                else => @compileError("command type must be Array, List, Struct, Union, or Ref type"),
+            }
         }
     };
 
@@ -115,14 +50,14 @@ pub const CommandScheme = struct {
 
         const result = comptime blk: {
             var commands: [Scheme.types.len]Command = undefined;
-            for (Scheme.types, 0..) |Type, i| {
-                commands[i] = Command.from(Type);
+            for (Scheme.types, 0..) |T, i| {
+                commands[i] = Command.from(T);
             }
 
             var dependency_types: []const type = &[_]type{};
-            for (Scheme.types) |Type| {
+            for (Scheme.types) |T| {
                 var deps: []const type = &[_]type{};
-                for (ObjectScheme.types(Type.field)) |Dep| {
+                for (ObjectScheme.types(T.cmd_type)) |Dep| {
                     deps = ObjectScheme.mergeTypes(deps, &[_]type{Dep});
                     deps = ObjectScheme.mergeTypes(deps, ObjectScheme.dependencies(Dep));
                 }
@@ -155,19 +90,19 @@ pub const FunctionScheme = struct {
         versions: []const Version,
 
         pub const Version = struct {
-            params: []const FieldType,
-            return_type: FieldType,
+            params: []const Type,
+            return_type: Type,
 
-            fn from(comptime Type: type) Version {
-                const info = @typeInfo(Type).Fn;
+            fn from(comptime T: type) Version {
+                const info = @typeInfo(T).Fn;
 
                 const result = comptime blk: {
-                    var params: [info.params.len]FieldType = undefined;
+                    var params: [info.params.len]Type = undefined;
                     for (info.params, 0..) |param, i| {
-                        params[i] = FieldType.from(param.type.?).?;
+                        params[i] = Type.from(param.type.?).?;
                     }
 
-                    const return_type = FieldType.from(info.return_type.?).?;
+                    const return_type = Type.from(info.return_type.?).?;
 
                     break :blk Version{
                         .params = params[0..],
@@ -179,14 +114,14 @@ pub const FunctionScheme = struct {
             }
         };
 
-        fn from(comptime Type: type) Function {
+        fn from(comptime T: type) Function {
             const result = comptime blk: {
-                var versions: [Type.versions.len]Version = undefined;
-                for (Type.versions, 0..) |Ver, i| {
+                var versions: [T.versions.len]Version = undefined;
+                for (T.versions, 0..) |Ver, i| {
                     versions[i] = Version.from(Ver);
                 }
                 break :blk Function{
-                    .name = Type.name,
+                    .name = T.name,
                     .versions = versions[0..],
                 };
             };
@@ -202,13 +137,13 @@ pub const FunctionScheme = struct {
 
         const result = comptime blk: {
             var functions: [Scheme.types.len]Function = undefined;
-            for (Scheme.types, 0..) |Type, i| {
-                functions[i] = Function.from(Type);
+            for (Scheme.types, 0..) |T, i| {
+                functions[i] = Function.from(T);
             }
 
             var dependency_types: []const type = &[_]type{};
-            for (Scheme.types) |Type| {
-                for (Type.versions) |Ver| {
+            for (Scheme.types) |T| {
+                for (T.versions) |Ver| {
                     var deps: []const type = &[_]type{};
                     for (ObjectScheme.types(Ver)) |Dep| {
                         deps = ObjectScheme.mergeTypes(deps, &[_]type{Dep});
@@ -240,7 +175,7 @@ pub const ObjectScheme = struct {
 
     pub const Object = struct {
         name: []const u8,
-        versions: []const FieldType,
+        versions: []const Type,
 
         fn merge(comptime left: Object, comptime right: Object) Object {
             if (left.versions.len > right.versions.len) {
@@ -259,7 +194,7 @@ pub const ObjectScheme = struct {
                 left.versions.len;
 
             for (0..matching_len) |i| {
-                if (!FieldType.eql(left.versions[i], right.versions[i])) {
+                if (!Type.eql(left.versions[i], right.versions[i])) {
                     @compileError("encountered differing field types for object " ++ left.name ++
                         "at version " ++ &[_]u8{i});
                 }
@@ -268,14 +203,14 @@ pub const ObjectScheme = struct {
             return left.versions.len == right.versions.len;
         }
 
-        fn from(comptime Type: type) Object {
+        fn from(comptime T: type) Object {
             const result = comptime blk: {
-                var versions: [Type.versions.len]FieldType = undefined;
-                for (Type.versions, 0..) |Ver, i| {
-                    versions[i] = FieldType.from(Ver).?;
+                var versions: [T.versions.len]Type = undefined;
+                for (T.versions, 0..) |Ver, i| {
+                    versions[i] = Type.from(Ver).?;
                 }
                 break :blk Object{
-                    .name = Type.name,
+                    .name = T.name,
                     .versions = versions[0..],
                 };
             };
@@ -283,9 +218,9 @@ pub const ObjectScheme = struct {
         }
     };
 
-    fn types(comptime Type: type) []const type {
+    fn types(comptime T: type) []const type {
         comptime {
-            switch (@typeInfo(Type)) {
+            switch (@typeInfo(T)) {
                 .Void, .Bool, .Int, .Float, .Enum => {
                     return &[_]type{};
                 },
@@ -293,21 +228,21 @@ pub const ObjectScheme = struct {
                     return ObjectScheme.types(info.child);
                 },
                 .Struct => |info| {
-                    if (@hasDecl(Type, "def_kind")) {
-                        switch (Type.def_kind) {
+                    if (@hasDecl(T, "def_kind")) {
+                        switch (T.def_kind) {
                             .this, .string, .ignore => {
                                 return &[_]type{};
                             },
                             .ref => {
-                                return &[_]type{Type.scheme};
+                                return &[_]type{T.scheme};
                             },
                             .array, .list => {
-                                return ObjectScheme.types(Type.child);
+                                return ObjectScheme.types(T.child);
                             },
                             .map => {
                                 return ObjectScheme.mergeTypes(
-                                    ObjectScheme.types(Type.key),
-                                    ObjectScheme.types(Type.value),
+                                    ObjectScheme.types(T.key),
+                                    ObjectScheme.types(T.value),
                                 );
                             },
                             else => @compileError("unexpected field type"),
@@ -343,8 +278,8 @@ pub const ObjectScheme = struct {
     pub fn dependencies(comptime Scheme: type) []const type {
         comptime {
             var result: []const type = &[_]type{};
-            for (Scheme.types) |Type| {
-                for (Type.versions) |Ver| {
+            for (Scheme.types) |T| {
+                for (T.versions) |Ver| {
                     var deps: []const type = &[_]type{};
                     for (ObjectScheme.types(Ver)) |Dep| {
                         if (Dep == Scheme)
@@ -429,8 +364,8 @@ pub const ObjectScheme = struct {
 
         const result = comptime blk: {
             var objects: [Scheme.types.len]Object = undefined;
-            for (Scheme.types, 0..) |Type, i| {
-                objects[i] = Object.from(Type);
+            for (Scheme.types, 0..) |T, i| {
+                objects[i] = Object.from(T);
             }
             break :blk ObjectScheme{
                 .name = Scheme.name,
@@ -442,47 +377,254 @@ pub const ObjectScheme = struct {
     }
 };
 
-pub const FieldType = union(enum) {
+pub const Type = union(enum) {
     Void: void,
     Bool: void,
-    Int: std.builtin.Type.Int,
-    Float: std.builtin.Type.Float,
-    Optional: *const FieldType,
-    Ref: Ref,
-    Array: Array,
-    List: *const FieldType,
-    Map: Map,
     String: void,
-    Struct: []const StructField,
-    Tuple: []const FieldType,
-    Union: []const UnionField,
-    Enum: []const EnumField,
+    Int: Int,
+    Float: Float,
+    Optional: Optional,
+    Array: Array,
+    List: List,
+    Map: Map,
+    Struct: Struct,
+    Tuple: Tuple,
+    Union: Union,
+    Enum: Enum,
+    Ref: Ref,
+
+    pub const Int = struct {
+        signedness: Signedness,
+        bits: u16,
+
+        pub const Signedness = enum {
+            signed,
+            unsigned,
+        };
+    };
+
+    pub const Float = struct {
+        bits: u16,
+    };
+
+    pub const Optional = struct {
+        child: *const Type,
+    };
 
     pub const Array = struct {
         len: usize,
-        child: *const FieldType,
+        child: *const Type,
+    };
+
+    pub const List = struct {
+        child: *const Type,
     };
 
     pub const Map = struct {
-        key: *const FieldType,
-        value: *const FieldType,
+        key: *const Type,
+        value: *const Type,
     };
 
-    pub const StructField = struct {
-        name: []const u8,
-        type: FieldType,
+    pub const Struct = struct {
+        fields: []const Field,
+
+        pub const Field = struct {
+            name: []const u8,
+            type: Type,
+        };
     };
 
-    pub const UnionField = struct {
-        name: []const u8,
-        type: FieldType,
+    pub const Tuple = struct {
+        fields: []const Type,
     };
 
-    pub const EnumField = struct {
-        name: []const u8,
+    pub const Union = struct {
+        fields: []const Field,
+
+        pub const Field = struct {
+            name: []const u8,
+            type: Type,
+        };
     };
 
-    fn eql(l: ?FieldType, r: ?FieldType) bool {
+    pub const Enum = struct {
+        fields: []const Field,
+
+        pub const Field = struct {
+            name: []const u8,
+        };
+    };
+
+    pub const Ref = union(enum) {
+        Internal: Internal,
+        External: External,
+
+        pub const Internal = struct {
+            name: []const u8,
+        };
+
+        pub const External = struct {
+            scheme: []const u8,
+            name: []const u8,
+        };
+
+        fn eql(left: Ref, right: Ref) bool {
+            if (left.scheme != null) {
+                if (right.scheme == null or !std.mem.eql(u8, left.scheme.?, right.scheme.?)) {
+                    return false;
+                }
+            } else if (right.scheme != null) {
+                return false;
+            }
+
+            return std.mem.eql(u8, left.name, right.name);
+        }
+    };
+
+    pub fn from(comptime T: type) ?Type {
+        return switch (@typeInfo(T)) {
+            .Void => .Void,
+            .Bool => .Bool,
+            .Int => |info| Type{
+                .Int = Int{
+                    .signedness = switch (info.signedness) {
+                        .signed => .signed,
+                        .unsigned => .unsigned,
+                    },
+                    .bits = info.bits,
+                },
+            },
+            .Float => |info| Type{
+                .Float = Float{
+                    .bits = info.bits,
+                },
+            },
+            .Optional => |info| comptime blk: {
+                const child = Type.from(info.child).?;
+                break :blk Type{
+                    .Optional = Optional{
+                        .child = &child,
+                    },
+                };
+            },
+            .Struct => |info| if (@hasDecl(T, "def_kind")) switch (T.def_kind) {
+                .this => Type{
+                    .Ref = Ref{
+                        .Internal = Ref.Internal{
+                            .name = T.name,
+                        },
+                    },
+                },
+                .ref => Type{
+                    .Ref = Ref{
+                        .External = Ref.External{
+                            .scheme = T.scheme.name,
+                            .name = T.def.name,
+                        },
+                    },
+                },
+                .array => comptime blk: {
+                    const child = Type.from(T.child).?;
+                    break :blk Type{
+                        .Array = Array{
+                            .len = T.len,
+                            .child = &child,
+                        },
+                    };
+                },
+                .list => comptime blk: {
+                    const child = Type.from(T.child).?;
+                    break :blk Type{
+                        .List = List{
+                            .child = &child,
+                        },
+                    };
+                },
+                .map => comptime blk: {
+                    const key = Type.from(T.key).?;
+                    const value = Type.from(T.value).?;
+                    break :blk Type{
+                        .Map = Map{
+                            .key = &key,
+                            .value = &value,
+                        },
+                    };
+                },
+                .string => .String,
+                .ignore => null,
+                else => @compileError("unexpected def_kind"),
+            } else if (info.is_tuple) comptime blk: {
+                var field_types: [info.fields.len]Type = undefined;
+                var len = 0;
+                for (info.fields) |field| {
+                    if (Type.from(field.type)) |field_type| {
+                        field_types[len] = field_type;
+                        len += 1;
+                    }
+                }
+                break :blk Type{
+                    .Tuple = Tuple{
+                        .fields = field_types[0..len],
+                    },
+                };
+            } else comptime blk: {
+                var fields: [info.fields.len]Struct.Field = undefined;
+                var len = 0;
+                for (info.fields) |field| {
+                    if (Type.from(field.type)) |field_type| {
+                        fields[len] = Struct.Field{
+                            .name = field.name,
+                            .type = field_type,
+                        };
+                        len += 1;
+                    }
+                }
+                break :blk Type{
+                    .Struct = Struct{
+                        .fields = fields[0..len],
+                    },
+                };
+            },
+            .Union => |info| comptime blk: {
+                if (info.tag_type == null) {
+                    @compileError("union field type must have tag type");
+                }
+
+                var fields: [info.fields.len]Union.Field = undefined;
+                var len = 0;
+                for (info.fields) |field| {
+                    if (Type.from(field.type)) |field_type| {
+                        fields[len] = Union.Field{
+                            .name = field.name,
+                            .type = field_type,
+                        };
+                        len += 1;
+                    }
+                }
+                break :blk Type{
+                    .Union = Union{
+                        .fields = fields[0..len],
+                    },
+                };
+            },
+            .Enum => |info| comptime blk: {
+                var fields: [info.fields.len]Enum.Field = undefined;
+                for (info.fields, 0..) |field, i| {
+                    fields[i] = Enum.Field{
+                        .name = field.name,
+                    };
+                }
+                break :blk Type{
+                    .Enum = Enum{
+                        .fields = &fields,
+                    },
+                };
+            },
+            else => @compileError("unexpected field type"),
+        };
+    }
+
+    fn eql(l: ?Type, r: ?Type) bool {
         if (l == null) {
             return r == null;
         } else if (r == null) {
@@ -492,295 +634,75 @@ pub const FieldType = union(enum) {
         const left = l.?;
         const right = r.?;
 
-        switch (left) {
-            .Void => {
-                return right == .Void;
-            },
-            .Bool => {
-                return right == .Bool;
-            },
-            .Int => {
-                return right == .Int and
-                    left.Int.signedness == right.Int.signedness and
-                    left.Int.bits == right.Int.bits;
-            },
-            .Float => {
-                return right == .Float and
-                    left.Float.bits == right.Float.bits;
-            },
-            .Optional => {
-                return right == .Optional and
-                    FieldType.eql(left.Optional.*, right.Optional.*);
-            },
-            .Ref => {
-                return right == .Ref and
-                    Ref.eql(left.Ref, right.Ref);
-            },
-            .Array => {
-                return right == .Array and
-                    left.Array.len == right.Array.len and
-                    FieldType.eql(left.Array.child.*, right.Array.child.*);
-            },
-            .List => {
-                return right == .List and
-                    FieldType.eql(left.List.*, right.List.*);
-            },
-            .Map => {
-                return right == .Map and
-                    FieldType.eql(left.Map.key.*, right.Map.key.*) and
-                    FieldType.eql(left.Map.value.*, right.Map.value.*);
-            },
-            .String => {
-                return right == .String;
-            },
-            .Struct => {
-                if (right != .Struct or left.Struct.len != right.Struct.len) {
-                    return false;
-                }
+        return switch (left) {
+            .Void => right == .Void,
+            .Bool => right == .Bool,
+            .String => right == .String,
 
-                for (left.Struct, right.Struct) |left_field, right_field| {
-                    if (!std.mem.eql(u8, left_field.name, right_field.name) or
-                        !FieldType.eql(left_field.type, right_field.type))
-                    {
-                        return false;
-                    }
-                }
+            .Int => right == .Int and
+                left.Int.signedness == right.Int.signedness and
+                left.Int.bits == right.Int.bits,
 
-                return true;
-            },
-            .Tuple => {
-                if (right != .Tuple or left.Tuple.len != right.Tuple.len) {
-                    return false;
-                }
+            .Float => right == .Float and
+                left.Float.bits == right.Float.bits,
 
-                for (left.Tuple, right.Tuple) |left_type, right_type| {
-                    if (!FieldType.eql(left_type, right_type)) {
-                        return false;
-                    }
-                }
+            .Optional => right == .Optional and
+                Type.eql(left.Optional.child.*, right.Optional.child.*),
 
-                return true;
-            },
-            .Union => {
-                if (right != .Union or
-                    left.Union.len != right.Union.len)
+            .Array => right == .Array and
+                left.Array.len == right.Array.len and
+                Type.eql(left.Array.child.*, right.Array.child.*),
+
+            .List => right == .List and
+                Type.eql(left.List.child.*, right.List.child.*),
+
+            .Map => right == .Map and
+                Type.eql(left.Map.key.*, right.Map.key.*) and
+                Type.eql(left.Map.value.*, right.Map.value.*),
+
+            .Struct => if (right != .Struct or left.Struct.fields.len != right.Struct.fields.len)
+                false
+            else for (left.Struct.fields, right.Struct.fields) |left_field, right_field| {
+                if (!std.mem.eql(u8, left_field.name, right_field.name) or
+                    !Type.eql(left_field.type, right_field.type))
                 {
-                    return false;
+                    break false;
                 }
+            } else true,
 
-                for (left.Union, right.Union) |left_field, right_field| {
-                    if (!std.mem.eql(u8, left_field.name, right_field.name) or
-                        !FieldType.eql(left_field.type, right_field.type))
-                    {
-                        return false;
-                    }
+            .Tuple => if (right != .Tuple or left.Tuple.fields.len != right.Tuple.fields.len)
+                false
+            else for (left.Tuple.fields, right.Tuple.fields) |left_type, right_type| {
+                if (!Type.eql(left_type, right_type)) {
+                    break false;
                 }
+            } else true,
 
-                return true;
-            },
-            .Enum => {
-                if (right != .Enum or
-                    left.Enum.len != right.Enum.len)
+            .Union => if (right != .Union or left.Union.fields.len != right.Union.fields.len)
+                false
+            else for (left.Union.fields, right.Union.fields) |left_field, right_field| {
+                if (!std.mem.eql(u8, left_field.name, right_field.name) or
+                    !Type.eql(left_field.type, right_field.type))
                 {
-                    return false;
+                    break false;
                 }
+            } else true,
 
-                for (left.Enum, right.Enum) |left_field, right_field| {
-                    if (!std.mem.eql(u8, left_field.name, right_field.name)) {
-                        return false;
-                    }
+            .Enum => if (right != .Enum or left.Enum.fields.len != right.Enum.fields.len)
+                false
+            else for (left.Enum.fields, right.Enum.fields) |left_field, right_field| {
+                if (!std.mem.eql(u8, left_field.name, right_field.name)) {
+                    break false;
                 }
+            } else true,
 
-                return true;
+            .Ref => right == .Ref and switch (left.Ref) {
+                .Internal => right.Ref == .Internal and
+                    std.mem.eql(u8, left.Ref.Internal.name, right.Ref.Internal.name),
+                .External => right.Ref == .External and
+                    std.mem.eql(u8, left.Ref.External.scheme, right.Ref.External.scheme) and
+                    std.mem.eql(u8, left.Ref.External.name, right.Ref.External.name),
             },
-        }
-    }
-
-    pub fn from(comptime Type: type) ?FieldType {
-        switch (@typeInfo(Type)) {
-            .Void => {
-                return FieldType.Void;
-            },
-            .Bool => {
-                return FieldType.Bool;
-            },
-            .Int => |info| {
-                return FieldType{
-                    .Int = info,
-                };
-            },
-            .Float => |info| {
-                return FieldType{
-                    .Float = info,
-                };
-            },
-            .Optional => |info| {
-                const result = comptime blk: {
-                    const child = FieldType.from(info.child).?;
-                    break :blk FieldType{
-                        .Optional = &child,
-                    };
-                };
-                return result;
-            },
-            .Struct => |info| {
-                if (@hasDecl(Type, "def_kind"))
-                    switch (Type.def_kind) {
-                        .this => {
-                            return FieldType{
-                                .Ref = Ref{
-                                    .scheme = null,
-                                    .name = Type.name,
-                                },
-                            };
-                        },
-                        .ref => {
-                            return FieldType{
-                                .Ref = Ref.from(Type),
-                            };
-                        },
-                        .array => {
-                            const result = comptime blk: {
-                                const child = FieldType.from(Type.child).?;
-                                break :blk FieldType{
-                                    .Array = Array{
-                                        .len = Type.len,
-                                        .child = &child,
-                                    },
-                                };
-                            };
-                            return result;
-                        },
-                        .list => {
-                            const result = comptime blk: {
-                                const child = FieldType.from(Type.child).?;
-                                break :blk FieldType{
-                                    .List = &child,
-                                };
-                            };
-                            return result;
-                        },
-                        .map => {
-                            const result = comptime blk: {
-                                const key = FieldType.from(Type.key).?;
-                                const value = FieldType.from(Type.value).?;
-                                break :blk FieldType{
-                                    .Map = Map{
-                                        .key = &key,
-                                        .value = &value,
-                                    },
-                                };
-                            };
-                            return result;
-                        },
-                        .string => {
-                            return FieldType.String;
-                        },
-                        .ignore => {
-                            return null;
-                        },
-                        else => @compileError("unexpected def_kind"),
-                    }
-                else {
-                    if (info.is_tuple) {
-                        const result = comptime blk: {
-                            var field_types: [info.fields.len]FieldType = undefined;
-                            var len = 0;
-                            for (info.fields) |field| {
-                                if (FieldType.from(field.type)) |field_type| {
-                                    field_types[len] = field_type;
-                                    len += 1;
-                                }
-                            }
-                            break :blk FieldType{
-                                .Tuple = field_types[0..len],
-                            };
-                        };
-                        return result;
-                    } else {
-                        const result = comptime blk: {
-                            var fields: [info.fields.len]StructField = undefined;
-                            var len = 0;
-                            for (info.fields) |field| {
-                                if (FieldType.from(field.type)) |field_type| {
-                                    fields[len] = StructField{
-                                        .name = field.name,
-                                        .type = field_type,
-                                    };
-                                    len += 1;
-                                }
-                            }
-                            break :blk FieldType{
-                                .Struct = fields[0..len],
-                            };
-                        };
-                        return result;
-                    }
-                }
-            },
-            .Union => |info| {
-                const result = comptime blk: {
-                    if (info.tag_type == null) {
-                        @compileError("union field type must have tag type");
-                    }
-
-                    var fields: [info.fields.len]UnionField = undefined;
-                    var len = 0;
-                    for (info.fields) |field| {
-                        if (FieldType.from(field.type)) |field_type| {
-                            fields[len] = UnionField{
-                                .name = field.name,
-                                .type = field_type,
-                            };
-                            len += 1;
-                        }
-                    }
-                    break :blk FieldType{
-                        .Union = fields[0..len],
-                    };
-                };
-                return result;
-            },
-            .Enum => |info| {
-                const result = comptime blk: {
-                    var fields: [info.fields.len]EnumField = undefined;
-                    for (info.fields, 0..) |field, i| {
-                        fields[i] = EnumField{
-                            .name = field.name,
-                        };
-                    }
-
-                    break :blk FieldType{
-                        .Enum = &fields,
-                    };
-                };
-                return result;
-            },
-            else => @compileError("unexpected field type"),
-        }
-    }
-};
-
-pub const Ref = struct {
-    scheme: ?[]const u8,
-    name: []const u8,
-
-    fn eql(left: Ref, right: Ref) bool {
-        if (left.scheme != null) {
-            if (right.scheme == null or !std.mem.eql(u8, left.scheme.?, right.scheme.?)) {
-                return false;
-            }
-        } else if (right.scheme != null) {
-            return false;
-        }
-
-        return std.mem.eql(u8, left.name, right.name);
-    }
-
-    fn from(comptime Type: type) Ref {
-        return Ref{
-            .scheme = Type.scheme.name,
-            .name = Type.def.name,
         };
     }
 };
@@ -790,50 +712,52 @@ pub const Ref = struct {
 // hand-writter 'expect' functions, defined at the very bottom.
 
 test "void field type" {
-    try expectFieldTypeEql(FieldType.Void, FieldType.from(void));
+    try expectTypeEql(.Void, Type.from(void));
 }
 
 test "bool field type" {
-    try expectFieldTypeEql(FieldType.Bool, FieldType.from(bool));
+    try expectTypeEql(.Bool, Type.from(bool));
 }
 
 test "int field type" {
-    try expectFieldTypeEql(
-        FieldType{
+    try expectTypeEql(
+        .{
             .Int = .{
                 .signedness = .signed,
                 .bits = 8,
             },
         },
-        FieldType.from(i8),
+        Type.from(i8),
     );
 
-    try expectFieldTypeEql(
-        FieldType{
+    try expectTypeEql(
+        .{
             .Int = .{
                 .signedness = .unsigned,
                 .bits = 8,
             },
         },
-        FieldType.from(u8),
+        Type.from(u8),
     );
 }
 
 test "float field type" {
-    try expectFieldTypeEql(FieldType{ .Float = .{ .bits = 16 } }, FieldType.from(f16));
+    try expectTypeEql(Type{ .Float = .{ .bits = 16 } }, Type.from(f16));
 }
 
 test "optional field type" {
-    try expectFieldTypeEql(
-        FieldType{
-            .Optional = &FieldType{
-                .Int = .{
-                    .signedness = .unsigned,
-                    .bits = 8,
+    try expectTypeEql(
+        .{
+            .Optional = .{
+                .child = &.{
+                    .Int = .{
+                        .signedness = .unsigned,
+                        .bits = 8,
+                    },
                 },
             },
         },
-        FieldType.from(?u8),
+        Type.from(?u8),
     );
 }
 
@@ -843,79 +767,85 @@ test "ref field type" {
             u8,
         }),
     });
-    try expectFieldTypeEql(
-        FieldType{
-            .Ref = Ref{
-                .scheme = "objs",
-                .name = "Obj",
+    try expectTypeEql(
+        .{
+            .Ref = .{
+                .External = .{
+                    .scheme = "objs",
+                    .name = "Obj",
+                },
             },
         },
-        FieldType.from(Objs("Obj")),
+        Type.from(Objs("Obj")),
     );
 }
 
 test "array field type" {
-    try expectFieldTypeEql(
-        FieldType{
+    try expectTypeEql(
+        .{
             .Array = .{
                 .len = 32,
-                .child = &FieldType{
+                .child = &.{
                     .Bool = undefined,
                 },
             },
         },
-        FieldType.from(define.Array(32, bool)),
+        Type.from(define.Array(32, bool)),
     );
 }
 
 test "list field type" {
-    try expectFieldTypeEql(
-        FieldType{
-            .List = &FieldType{
-                .Bool = undefined,
+    try expectTypeEql(
+        .{
+            .List = .{
+                .child = &.{
+                    .Bool = undefined,
+                },
             },
         },
-        FieldType.from(define.List(bool)),
+        Type.from(define.List(bool)),
     );
 }
 
 test "map field type" {
-    try expectFieldTypeEql(
-        FieldType{
+    try expectTypeEql(
+        .{
             .Map = .{
-                .key = &FieldType{ .Bool = undefined },
-                .value = &FieldType{ .Bool = undefined },
+                .key = &.{ .Bool = undefined },
+                .value = &.{ .Bool = undefined },
             },
         },
-        FieldType.from(define.Map(bool, bool)),
+        Type.from(define.Map(bool, bool)),
     );
 }
 
 test "string field type" {
-    try expectFieldTypeEql(
-        FieldType{
+    try expectTypeEql(
+        .{
             .String = undefined,
         },
-        FieldType.from(define.String),
+        Type.from(define.String),
     );
 }
 
 test "struct field type" {
     const expected = .{
-        FieldType.StructField{
+        Type.Struct.Field{
             .name = "one",
-            .type = FieldType.Bool,
+            .type = Type.Bool,
         },
-        FieldType.StructField{
+        Type.Struct.Field{
             .name = "two",
-            .type = FieldType.String,
+            .type = Type.String,
         },
     };
-    try expectFieldTypeEql(
-        FieldType{
-            .Struct = &expected,
+    try expectTypeEql(
+        .{
+            .Struct = .{
+                .fields = &expected,
+            },
         },
-        FieldType.from(struct {
+        Type.from(struct {
             one: bool,
             two: define.String,
         }),
@@ -924,15 +854,17 @@ test "struct field type" {
 
 test "tuple field type" {
     const expected = .{
-        FieldType.Bool,
-        FieldType.String,
+        Type.Bool,
+        Type.String,
     };
 
-    try expectFieldTypeEql(
-        FieldType{
-            .Tuple = &expected,
+    try expectTypeEql(
+        .{
+            .Tuple = .{
+                .fields = &expected,
+            },
         },
-        FieldType.from(struct {
+        Type.from(struct {
             bool,
             define.String,
         }),
@@ -941,21 +873,23 @@ test "tuple field type" {
 
 test "union field type" {
     const expected_fields = .{
-        FieldType.UnionField{
+        Type.Union.Field{
             .name = "One",
-            .type = FieldType.Bool,
+            .type = Type.Bool,
         },
-        FieldType.UnionField{
+        Type.Union.Field{
             .name = "Two",
-            .type = FieldType.String,
+            .type = Type.String,
         },
     };
 
-    try expectFieldTypeEql(
-        FieldType{
-            .Union = &expected_fields,
+    try expectTypeEql(
+        .{
+            .Union = .{
+                .fields = &expected_fields,
+            },
         },
-        FieldType.from(union(enum) {
+        Type.from(union(enum) {
             One: bool,
             Two: define.String,
         }),
@@ -963,18 +897,20 @@ test "union field type" {
 }
 
 test "enum field type" {
-    try expectFieldTypeEql(
-        FieldType{
-            .Enum = &.{
-                FieldType.EnumField{
-                    .name = "One",
-                },
-                FieldType.EnumField{
-                    .name = "Two",
+    try expectTypeEql(
+        .{
+            .Enum = .{
+                .fields = &.{
+                    .{
+                        .name = "One",
+                    },
+                    .{
+                        .name = "Two",
+                    },
                 },
             },
         },
-        FieldType.from(enum {
+        Type.from(enum {
             One,
             Two,
         }),
@@ -991,8 +927,8 @@ test "object" {
         .{
             .name = "Obj",
             .versions = &.{
-                FieldType.Bool,
-                FieldType.String,
+                .Bool,
+                .String,
             },
         },
         ObjectScheme.Object.from(Obj),
@@ -1007,13 +943,13 @@ test "object scheme" {
     });
 
     try expectObjectSchemeEql(
-        ObjectScheme{
+        .{
             .name = "scheme/objs",
             .objects = &.{
-                ObjectScheme.Object{
+                .{
                     .name = "One",
                     .versions = &.{
-                        FieldType.Bool,
+                        .Bool,
                     },
                 },
             },
@@ -1047,31 +983,35 @@ test "object scheme dependencies" {
     });
 
     const expected: []const ObjectScheme = &.{
-        ObjectScheme{
+        .{
             .name = "scheme/dep1",
             .objects = &.{
-                ObjectScheme.Object{
+                .{
                     .name = "Obj",
                     .versions = &.{
-                        FieldType.Bool,
+                        .Bool,
                     },
                 },
             },
         },
-        ObjectScheme{
+        .{
             .name = "scheme/dep2",
             .objects = &.{
-                ObjectScheme.Object{
+                .{
                     .name = "Obj",
                     .versions = &.{
-                        FieldType{
-                            .Struct = &.{
-                                FieldType.StructField{
-                                    .name = "obj1",
-                                    .type = FieldType{
-                                        .Ref = Ref{
-                                            .scheme = "scheme/dep1",
-                                            .name = "Obj",
+                        .{
+                            .Struct = .{
+                                .fields = &.{
+                                    .{
+                                        .name = "obj1",
+                                        .type = .{
+                                            .Ref = .{
+                                                .External = .{
+                                                    .scheme = "scheme/dep1",
+                                                    .name = "Obj",
+                                                },
+                                            },
                                         },
                                     },
                                 },
@@ -1124,35 +1064,36 @@ test "object scheme merge" {
     });
 
     const expected: []const ObjectScheme = &.{
-        ObjectScheme{
+        .{
             .name = "scheme/dep",
             .objects = &.{
-                ObjectScheme.Object{
+                .{
                     .name = "One",
                     .versions = &.{
-                        FieldType.Bool,
-                        FieldType.String,
+                        .Bool,
+                        .String,
                     },
                 },
-                ObjectScheme.Object{
+                .{
                     .name = "Two",
                     .versions = &.{
-                        FieldType
-                            .String,
+                        .String,
                     },
                 },
             },
         },
-        ObjectScheme{
+        .{
             .name = "scheme/dep2",
             .objects = &.{
-                ObjectScheme.Object{
+                .{
                     .name = "Obj",
                     .versions = &.{
-                        FieldType{
-                            .Ref = Ref{
-                                .scheme = "scheme/dep",
-                                .name = "One",
+                        .{
+                            .Ref = .{
+                                .External = .{
+                                    .scheme = "scheme/dep",
+                                    .name = "One",
+                                },
                             },
                         },
                     },
@@ -1178,9 +1119,9 @@ test "function version" {
     try expectFunctionVersionEql(
         .{
             .params = &.{
-                FieldType.Bool,
+                .Bool,
             },
-            .return_type = FieldType.Bool,
+            .return_type = .Bool,
         },
         FunctionScheme.Function.Version.from(fn (bool) bool),
     );
@@ -1197,9 +1138,9 @@ test "function" {
             .versions = &.{
                 .{
                     .params = &.{
-                        FieldType.Bool,
+                        .Bool,
                     },
-                    .return_type = FieldType.String,
+                    .return_type = .String,
                 },
             },
         },
@@ -1253,15 +1194,19 @@ test "function scheme" {
                             .params = &.{
                                 .{
                                     .Ref = .{
-                                        .scheme = "dep2",
-                                        .name = "Obj",
+                                        .External = .{
+                                            .scheme = "dep2",
+                                            .name = "Obj",
+                                        },
                                     },
                                 },
                             },
                             .return_type = .{
                                 .Ref = .{
-                                    .scheme = "dep3",
-                                    .name = "Obj",
+                                    .External = .{
+                                        .scheme = "dep3",
+                                        .name = "Obj",
+                                    },
                                 },
                             },
                         },
@@ -1275,10 +1220,12 @@ test "function scheme" {
                         .{
                             .name = "Obj",
                             .versions = &.{
-                                FieldType{
+                                .{
                                     .Ref = .{
-                                        .scheme = "dep1",
-                                        .name = "Obj",
+                                        .External = .{
+                                            .scheme = "dep1",
+                                            .name = "Obj",
+                                        },
                                     },
                                 },
                             },
@@ -1291,8 +1238,8 @@ test "function scheme" {
                         .{
                             .name = "Obj",
                             .versions = &.{
-                                FieldType.Bool,
-                                FieldType.String,
+                                .Bool,
+                                .String,
                             },
                         },
                     },
@@ -1303,23 +1250,29 @@ test "function scheme" {
                         .{
                             .name = "Obj",
                             .versions = &.{
-                                FieldType{
-                                    .Struct = &.{
-                                        .{
-                                            .name = "obj1",
-                                            .type = FieldType{
-                                                .Ref = .{
-                                                    .scheme = "dep1",
-                                                    .name = "Obj",
+                                .{
+                                    .Struct = .{
+                                        .fields = &.{
+                                            .{
+                                                .name = "obj1",
+                                                .type = .{
+                                                    .Ref = .{
+                                                        .External = .{
+                                                            .scheme = "dep1",
+                                                            .name = "Obj",
+                                                        },
+                                                    },
                                                 },
                                             },
-                                        },
-                                        .{
-                                            .name = "obj2",
-                                            .type = FieldType{
-                                                .Ref = .{
-                                                    .scheme = "dep2",
-                                                    .name = "Obj",
+                                            .{
+                                                .name = "obj2",
+                                                .type = .{
+                                                    .Ref = .{
+                                                        .External = .{
+                                                            .scheme = "dep2",
+                                                            .name = "Obj",
+                                                        },
+                                                    },
                                                 },
                                             },
                                         },
@@ -1332,115 +1285,6 @@ test "function scheme" {
             },
         },
         FunctionScheme.from(Fns),
-    );
-}
-
-test "ref command field type" {
-    const Objs = define.Scheme("objs", .{
-        define.Object("Obj", .{u8}),
-    });
-    try expectCommandFieldTypeEql(
-        .{
-            .Ref = Ref{
-                .scheme = "objs",
-                .name = "Obj",
-            },
-        },
-        CommandScheme.Command.CommandFieldType.from(Objs("Obj")),
-    );
-}
-
-test "array command field type" {
-    const Objs = define.Scheme("objs", .{
-        define.Object("Obj", .{u8}),
-    });
-
-    try expectCommandFieldTypeEql(
-        .{
-            .Array = .{
-                .len = 32,
-                .child = &.{
-                    .Ref = .{
-                        .scheme = "objs",
-                        .name = "Obj",
-                    },
-                },
-            },
-        },
-        CommandScheme.Command.CommandFieldType.from(define.Array(32, Objs("Obj"))),
-    );
-}
-
-test "list command field type" {
-    const Objs = define.Scheme("objs", .{
-        define.Object("Obj", .{u8}),
-    });
-
-    try expectCommandFieldTypeEql(
-        .{
-            .List = &.{
-                .Ref = .{
-                    .scheme = "objs",
-                    .name = "Obj",
-                },
-            },
-        },
-        CommandScheme.Command.CommandFieldType.from(define.List(Objs("Obj"))),
-    );
-}
-
-test "struct command field type" {
-    const Objs = define.Scheme("objs", .{
-        define.Object("Obj", .{u8}),
-    });
-
-    try expectCommandFieldTypeEql(
-        .{
-            .Struct = &.{
-                .{
-                    .name = "one",
-                    .type = .{
-                        .Ref = .{
-                            .scheme = "objs",
-                            .name = "Obj",
-                        },
-                    },
-                },
-            },
-        },
-        CommandScheme.Command.CommandFieldType.from(struct {
-            one: Objs("Obj"),
-        }),
-    );
-}
-
-test "union command field type" {
-    const Objs = define.Scheme("objs", .{
-        define.Object("Obj", .{u8}),
-    });
-
-    try expectCommandFieldTypeEql(
-        .{
-            .Union = &.{
-                .{
-                    .name = "One",
-                    .type = .{
-                        .Ref = .{
-                            .scheme = "objs",
-                            .name = "Obj",
-                        },
-                    },
-                },
-                .{
-                    .name = "Two",
-                    .type = null,
-                },
-            },
-        },
-        CommandScheme.Command.CommandFieldType.from(union(enum) {
-            One: Objs("Obj"),
-            Two,
-        }),
     );
 }
 
@@ -1457,14 +1301,18 @@ test "command" {
     try expectCommandEql(
         .{
             .name = "Cmd",
-            .field = .{
-                .Struct = &.{
-                    .{
-                        .name = "obj",
-                        .type = .{
-                            .Ref = .{
-                                .scheme = "objs",
-                                .name = "Obj",
+            .type = .{
+                .Struct = .{
+                    .fields = &.{
+                        .{
+                            .name = "obj",
+                            .type = .{
+                                .Ref = .{
+                                    .External = .{
+                                        .scheme = "objs",
+                                        .name = "Obj",
+                                    },
+                                },
                             },
                         },
                     },
@@ -1517,23 +1365,29 @@ test "command scheme" {
             .commands = &.{
                 .{
                     .name = "Cmd",
-                    .field = .{
-                        .Struct = &.{
-                            .{
-                                .name = "obj2",
-                                .type = .{
-                                    .Ref = .{
-                                        .scheme = "dep2",
-                                        .name = "Obj",
+                    .type = .{
+                        .Struct = .{
+                            .fields = &.{
+                                .{
+                                    .name = "obj2",
+                                    .type = .{
+                                        .Ref = .{
+                                            .External = .{
+                                                .scheme = "dep2",
+                                                .name = "Obj",
+                                            },
+                                        },
                                     },
                                 },
-                            },
-                            .{
-                                .name = "obj3",
-                                .type = .{
-                                    .Ref = .{
-                                        .scheme = "dep3",
-                                        .name = "Obj",
+                                .{
+                                    .name = "obj3",
+                                    .type = .{
+                                        .Ref = .{
+                                            .External = .{
+                                                .scheme = "dep3",
+                                                .name = "Obj",
+                                            },
+                                        },
                                     },
                                 },
                             },
@@ -1548,10 +1402,12 @@ test "command scheme" {
                         .{
                             .name = "Obj",
                             .versions = &.{
-                                FieldType{
+                                .{
                                     .Ref = .{
-                                        .scheme = "dep1",
-                                        .name = "Obj",
+                                        .External = .{
+                                            .scheme = "dep1",
+                                            .name = "Obj",
+                                        },
                                     },
                                 },
                             },
@@ -1564,8 +1420,8 @@ test "command scheme" {
                         .{
                             .name = "Obj",
                             .versions = &.{
-                                FieldType.Bool,
-                                FieldType.String,
+                                .Bool,
+                                .String,
                             },
                         },
                     },
@@ -1576,23 +1432,29 @@ test "command scheme" {
                         .{
                             .name = "Obj",
                             .versions = &.{
-                                FieldType{
-                                    .Struct = &.{
-                                        .{
-                                            .name = "obj1",
-                                            .type = FieldType{
-                                                .Ref = .{
-                                                    .scheme = "dep1",
-                                                    .name = "Obj",
+                                .{
+                                    .Struct = .{
+                                        .fields = &.{
+                                            .{
+                                                .name = "obj1",
+                                                .type = .{
+                                                    .Ref = .{
+                                                        .External = .{
+                                                            .scheme = "dep1",
+                                                            .name = "Obj",
+                                                        },
+                                                    },
                                                 },
                                             },
-                                        },
-                                        .{
-                                            .name = "obj2",
-                                            .type = FieldType{
-                                                .Ref = .{
-                                                    .scheme = "dep2",
-                                                    .name = "Obj",
+                                            .{
+                                                .name = "obj2",
+                                                .type = .{
+                                                    .Ref = .{
+                                                        .External = .{
+                                                            .scheme = "dep2",
+                                                            .name = "Obj",
+                                                        },
+                                                    },
                                                 },
                                             },
                                         },
@@ -1630,69 +1492,7 @@ fn expectCommandEql(expected: CommandScheme.Command, actual: CommandScheme.Comma
         return error.TestExpectedEqual;
     }
 
-    try expectCommandFieldTypeEql(expected.field, actual.field);
-}
-
-fn expectCommandFieldTypeEql(expected_opt: ?CommandScheme.Command.CommandFieldType, actual_opt: ?CommandScheme.Command.CommandFieldType) !void {
-    if (expected_opt == null) {
-        if (actual_opt != null) {
-            return error.TestExpectedEqual;
-        }
-        return;
-    } else if (actual_opt == null) {
-        return error.TestExpectedEqual;
-    }
-
-    const expected = expected_opt.?;
-    const actual = actual_opt.?;
-
-    switch (expected) {
-        .Struct => {
-            if (actual != .Struct or expected.Struct.len != actual.Struct.len) {
-                return error.TestExpectedEqual;
-            }
-
-            for (expected.Struct, actual.Struct) |exp, act| {
-                if (!std.mem.eql(u8, exp.name, act.name)) {
-                    return error.TestExpectedEqual;
-                }
-
-                try expectCommandFieldTypeEql(exp.type, act.type);
-            }
-        },
-        .Union => {
-            if (actual != .Union or expected.Union.len != actual.Union.len) {
-                return error.TestExpectedEqual;
-            }
-
-            for (expected.Union, actual.Union) |exp, act| {
-                if (!std.mem.eql(u8, exp.name, act.name)) {
-                    return error.TestExpectedEqual;
-                }
-
-                try expectCommandFieldTypeEql(exp.type, act.type);
-            }
-        },
-        .Array => {
-            if (actual != .Array or expected.Array.len != actual.Array.len) {
-                return error.TestExpectedEqual;
-            }
-
-            try expectCommandFieldTypeEql(expected.Array.child.*, actual.Array.child.*);
-        },
-        .List => {
-            if (actual != .List) {
-                return error.TestExpectedEqual;
-            }
-
-            try expectCommandFieldTypeEql(expected.List.*, actual.List.*);
-        },
-        .Ref => {
-            if (actual != .Ref or !Ref.eql(expected.Ref, actual.Ref)) {
-                return error.TestExpectedEqual;
-            }
-        },
-    }
+    try expectTypeEql(expected.type, actual.type);
 }
 
 fn expectFunctionSchemeEql(expected: FunctionScheme, actual: FunctionScheme) !void {
@@ -1730,10 +1530,10 @@ fn expectFunctionVersionEql(expected: FunctionScheme.Function.Version, actual: F
     }
 
     for (expected.params, actual.params) |exp, act| {
-        try expectFieldTypeEql(exp, act);
+        try expectTypeEql(exp, act);
     }
 
-    try expectFieldTypeEql(expected.return_type, actual.return_type);
+    try expectTypeEql(expected.return_type, actual.return_type);
 }
 
 fn expectObjectSchemeEql(expected: ObjectScheme, actual: ObjectScheme) !void {
@@ -1752,15 +1552,15 @@ fn expectObjectEql(expected: ObjectScheme.Object, actual: ObjectScheme.Object) !
     }
 
     for (expected.versions, actual.versions) |exp, act| {
-        if (!FieldType.eql(exp, act)) {
+        if (!Type.eql(exp, act)) {
             return error.TestExpectedEqual;
         }
     }
 }
 
-fn expectFieldTypeEql(expected: ?FieldType, actual: ?FieldType) !void {
+fn expectTypeEql(expected: ?Type, actual: ?Type) !void {
     // uses the `FieldType.eql` implementation since it does everything, including chasing pointers.
-    if (!FieldType.eql(expected, actual)) {
+    if (!Type.eql(expected, actual)) {
         return error.TestExpectedEqual;
     }
 }
