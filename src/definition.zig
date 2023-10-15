@@ -412,7 +412,7 @@ pub const Type = union(enum) {
     };
 
     pub const Array = struct {
-        len: usize,
+        len: u64,
         child: *const Type,
     };
 
