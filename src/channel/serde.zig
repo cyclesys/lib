@@ -3,15 +3,13 @@ const std = @import("std");
 pub fn View(comptime Type: type) type {
     return switch (@typeInfo(Type)) {
         .Void, .Bool, .Int, .Float, .Enum => Type,
-        .Pointer => |info| blk: {
-            if (info.size != .Slice) {
-                @compileError("unsupported pointer type");
-            }
-
-            break :blk if (info.child == u8)
+        .Pointer => |info| switch (info.size) {
+            .One => View(info.child),
+            .Slice => if (info.child == u8)
                 []const u8
             else
-                SliceView(Type);
+                SliceView(Type),
+            else => @compileError("unsupported pointer type"),
         },
         .Array => ArrayView(Type),
         .Struct => StructView(Type),
@@ -143,6 +141,7 @@ pub fn read(comptime Type: type, bytes: []const u8) View(Type) {
         .Bool => bytes[0] == 1,
         .Int, .Float => readPacked(Type, bytes),
         .Pointer => |info| switch (info.size) {
+            .One => read(info.child, bytes),
             .Slice => if (info.child == u8)
                 readByteSlice(bytes)
             else
@@ -212,15 +211,16 @@ pub fn write(value: anytype, out: *std.ArrayList(u8)) !void {
     _ = try writeValue(value, out);
 }
 
-fn writeValue(value: anytype, out: *std.ArrayList(u8)) !usize {
+fn writeValue(value: anytype, out: *std.ArrayList(u8)) std.mem.Allocator.Error!usize {
     const Type = @TypeOf(value);
     return switch (@typeInfo(Type)) {
         .Void => 0,
         .Bool, .Int, .Float => try writePacked(value, null, out),
-        .Pointer => |info| if (info.size == .Slice)
-            try writePacked(value.len, null, out) + try writeSlice(info.child, value, value.len, out)
-        else
-            @compileError(""),
+        .Pointer => |info| switch (info.size) {
+            .One => try writeValue(value.*, out),
+            .Slice => try writePacked(value.len, null, out) + try writeSlice(info.child, value, value.len, out),
+            else => @compileError("unsupported pointer type"),
+        },
         .Array => |info| try writeSlice(info.child, value, info.len, out),
         .Struct => try writeStruct(value, out),
         .Optional => if (value) |v|
@@ -378,6 +378,14 @@ test "float serde" {
     try expectSerdeValue(@as(f64, -20.0));
     try expectSerdeValue(@as(f80, 20.0));
     try expectSerdeValue(@as(f128, -30.0));
+}
+
+test "pointer serde" {
+    const value: u32 = 100;
+    const result = try serde(&value);
+    defer result.deinit();
+
+    try std.testing.expectEqual(value, result.view);
 }
 
 test "slice serde" {
