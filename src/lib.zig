@@ -1,14 +1,17 @@
-pub const define = @import("define.zig");
-pub const definition = @import("definition.zig");
-pub const channel = @import("channel.zig");
+pub const def = struct {
+    pub usingnamespace @import("define.zig");
+    pub usingnamespace @import("definition.zig");
+};
+
+pub const chan = struct {
+    pub usingnamespace @import("channel.zig");
+    pub usingnamespace @import("channel/serde.zig");
+};
+
 pub const init = @import("init.zig");
 pub const object = @import("object.zig");
 pub const ui = @import("ui.zig");
 pub const SharedMem = @import("SharedMem.zig");
-
-pub const CommandScheme = definition.CommandScheme;
-pub const FunctionScheme = definition.FunctionScheme;
-pub const ObjectScheme = definition.ObjectScheme;
 
 pub const InitChannel = init.InitChannel;
 
