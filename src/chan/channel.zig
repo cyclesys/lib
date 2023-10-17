@@ -1,7 +1,7 @@
 const std = @import("std");
-const win = @import("windows.zig");
+const win = @import("../windows.zig");
 
-const serde = @import("channel/serde.zig");
+const serde = @import("serde.zig");
 const SharedMem = @import("SharedMem.zig");
 
 pub fn Reader(comptime Message: type) type {
@@ -254,10 +254,6 @@ const Child = struct {
         self.writer.deinit();
     }
 };
-
-test {
-    _ = @import("channel/serde.zig");
-}
 
 test "channel io without timeout" {
     var reader = MessageReader.init(testing.allocator, try Channel.init(false));

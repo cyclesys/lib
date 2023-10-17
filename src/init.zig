@@ -1,19 +1,68 @@
 const std = @import("std");
-const windows = struct {
-    const mod = @import("win32");
-    usingnamespace mod.foundation;
+const win = @import("windows.zig");
+
+const chan = @import("lib.zig").chan;
+const def = @import("lib.zig").def;
+
+pub const SystemMessage = union(enum) {
+    fn ReaderInfo(comptime Message: type) type {
+        return struct {
+            chan: ChannelInfo,
+
+            const Reader = chan.Reader(Message);
+            const Self = @This();
+
+            pub fn into(self: *const Self, allocator: std.mem.Allocator) chan.Error!Reader {
+                return Reader.init(allocator, try self.chan.into());
+            }
+        };
+    }
+
+    fn WriterInfo(comptime Message: type) type {
+        return struct {
+            chan: ChannelInfo,
+
+            const Writer = chan.Writer(Message);
+            const Self = @This();
+
+            pub fn into(self: *const Self, allocator: std.mem.Allocator) chan.Error!Writer {
+                return Writer.init(allocator, try self.chan.into());
+            }
+        };
+    }
+
+    const ChannelInfo = struct {
+        wait_ev: usize,
+        signal_ev: usize,
+        file: usize,
+
+        pub fn into(self: *const ChannelInfo) chan.Error!chan.Channel {
+            const wait_ev: win.HANDLE = @ptrFromInt(self.wait_ev);
+            const signal_ev: win.HANDLE = @ptrFromInt(self.signal_ev);
+            const file: win.HANDLE = @ptrFromInt(self.file);
+            return chan.Channel.import(wait_ev, signal_ev, file);
+        }
+    };
 };
 
-const channel = @import("channel.zig");
-const definition = @import("definition.zig");
-const object = @import("object.zig");
+pub const PluginMessage = union(enum) {
+    SetVersion: Version,
+    SetIndex: []const def.ObjectScheme,
+    SetUI: []const def.TypeId,
+    Finalize: void,
+};
+
+pub const Version = struct {
+    major: u16,
+    minor: u16,
+};
 
 pub const InitChannel = struct {
     reader: Reader,
     writer: Writer,
 
-    const Reader = channel.Reader(SystemMessage);
-    const Writer = channel.Writer(PluginMessage);
+    const Reader = chan.Reader(SystemMessage);
+    const Writer = chan.Writer(PluginMessage);
 
     pub fn open(allocator: std.mem.Allocator) !InitChannel {
         const Handles = struct {
@@ -34,7 +83,7 @@ pub const InitChannel = struct {
                 std.process.argsFree(self.allocator, self.args);
             }
 
-            fn next(self: *@This()) !windows.HANDLE {
+            fn next(self: *@This()) !win.HANDLE {
                 if (self.pos >= self.args.len) {
                     return error.InvalidArgs;
                 }
@@ -44,12 +93,12 @@ pub const InitChannel = struct {
             }
         };
 
-        var handles = Handles.init(allocator);
+        var handles = try Handles.init(allocator);
         defer handles.deinit();
 
         const reader = Reader.init(
             allocator,
-            try channel.Channel.import(
+            try chan.Channel.import(
                 try handles.next(),
                 try handles.next(),
                 try handles.next(),
@@ -57,7 +106,7 @@ pub const InitChannel = struct {
         );
         var writer = Writer.init(
             allocator,
-            try channel.Channel.import(
+            try chan.Channel.import(
                 try handles.next(),
                 try handles.next(),
                 try handles.next(),
@@ -65,7 +114,10 @@ pub const InitChannel = struct {
         );
 
         try writer.write(.{
-            .RegisterLibVersion = 1,
+            .SetVersion = Version{
+                .major = 0,
+                .minor = 1,
+            },
         });
 
         return InitChannel{
@@ -74,95 +126,11 @@ pub const InitChannel = struct {
         };
     }
 
-    pub fn registerIndexSchemes(self: *InitChannel, schemes: []const definition.ObjectScheme) !void {
-        for (schemes) |scheme| {
-            try self.writer.write(.{
-                .RegisterIndexScheme = scheme,
-            });
-        }
-    }
-
-    pub fn read(self: *InitChannel) !SystemMessage {
+    pub fn read(self: *InitChannel) !chan.View(SystemMessage) {
         return self.reader.read();
     }
 
-    pub fn readFor(self: *InitChannel, timeout: u32) !?SystemMessage {
+    pub fn readFor(self: *InitChannel, timeout: u32) !?chan.View(SystemMessage) {
         return self.reader.readFor(timeout);
     }
-};
-
-pub const SystemMessage = union(enum) {
-    InitObjectChannel: ObjectChannelInfo,
-
-    pub const ObjectChannelInfo = struct {
-        reader: ObjectChannelReaderInfo,
-        writer: ObjectChannelWriterInfo,
-
-        pub const ObjectChannelReaderInfo = ReaderInfo(object.SystemMessage);
-        pub const ObjectChannelWriterInfo = WriterInfo(object.PluginMessage);
-
-        pub fn into(
-            self: *ObjectChannelInfo,
-            comptime Index: type,
-            allocator: std.mem.Allocator,
-            index: Index,
-        ) object.channel.ObjectChannel(Index) {
-            return object.ObjectChannel(Index).init(
-                allocator,
-                try self.reader.into(allocator),
-                try self.writer.into(allocator),
-                index,
-            );
-        }
-    };
-
-    fn ReaderInfo(comptime Message: type) type {
-        return struct {
-            chan: ChannelInfo,
-
-            const Reader = channel.Reader(Message);
-            const Self = @This();
-
-            pub fn into(
-                self: *const Self,
-                allocator: std.mem.Allocator,
-            ) channel.Error!Reader {
-                return Reader.init(allocator, try self.chan.into());
-            }
-        };
-    }
-
-    fn WriterInfo(comptime Message: type) type {
-        return struct {
-            chan: ChannelInfo,
-
-            const Writer = channel.Writer(Message);
-            const Self = @This();
-
-            pub fn into(
-                self: *const Self,
-                allocator: std.mem.Allocator,
-            ) channel.Error!Writer {
-                return Writer.init(allocator, try self.chan.into());
-            }
-        };
-    }
-
-    const ChannelInfo = struct {
-        wait_ev: usize,
-        signal_ev: usize,
-        file: usize,
-
-        pub fn into(self: *const ChannelInfo) channel.Error!channel.Channel {
-            const wait_ev: windows.HANDLE = @ptrFromInt(self.wait_ev);
-            const signal_ev: windows.HANDLE = @ptrFromInt(self.signal_ev);
-            const file: windows.HANDLE = @ptrFromInt(self.file);
-            return channel.Channel.import(wait_ev, signal_ev, file);
-        }
-    };
-};
-
-const PluginMessage = union(enum) {
-    RegisterLibVersion: u16,
-    RegisterIndexScheme: definition.ObjectScheme,
 };

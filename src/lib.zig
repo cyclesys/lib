@@ -1,30 +1,19 @@
 pub const def = struct {
-    pub usingnamespace @import("define.zig");
-    pub usingnamespace @import("definition.zig");
+    pub usingnamespace @import("def/define.zig");
+    pub usingnamespace @import("def/definition.zig");
+    pub usingnamespace @import("def/ids.zig");
 };
 
 pub const chan = struct {
-    pub usingnamespace @import("channel.zig");
-    pub usingnamespace @import("channel/serde.zig");
+    pub usingnamespace @import("chan/SharedMem.zig");
+    pub usingnamespace @import("chan/channel.zig");
+    pub usingnamespace @import("chan/serde.zig");
 };
 
-pub const init = @import("init.zig");
-pub const object = @import("object.zig");
-pub const ui = @import("ui.zig");
-pub const SharedMem = @import("SharedMem.zig");
-
-pub const InitChannel = init.InitChannel;
-
-pub const ObjectChannel = object.channel.ObjectChannel;
-pub const ObjectIndex = object.index.ObjectIndex;
-pub const ObjectView = object.read.ObjectView;
-pub const ObjectValue = object.write.ObjectValue;
-pub const ObjectMut = object.write.ObjectMut;
+pub usingnamespace @import("init.zig");
 
 test {
-    _ = @import("channel.zig");
-    _ = @import("definition.zig");
-    _ = @import("object.zig");
-    _ = @import("serde.zig");
-    _ = @import("ui.zig");
+    _ = @import("def/definition.zig");
+    _ = @import("chan/channel.zig");
+    _ = @import("chan/serde.zig");
 }
