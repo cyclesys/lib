@@ -10,7 +10,9 @@ pub const chan = struct {
     pub usingnamespace @import("chan/serde.zig");
 };
 
-pub usingnamespace @import("init.zig");
+pub const main = @import("init.zig");
+pub const InitConfig = main.InitConfig;
+pub const init = main.init;
 
 test {
     _ = @import("def/definition.zig");
