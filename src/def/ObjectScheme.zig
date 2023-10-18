@@ -27,29 +27,21 @@ pub const Object = struct {
     }
 
     fn merge(comptime left: Object, comptime right: Object) Object {
-        if (left.versions.len > right.versions.len) {
-            return left;
-        } else if (right.versions.len > left.versions.len) {
-            return right;
-        } else {
-            @compileError("unexpected Object.merge state");
-        }
-    }
-
-    fn eql(comptime left: Object, comptime right: Object) bool {
-        const matching_len = if (left.versions.len > right.versions.len)
-            right.versions.len
-        else
-            left.versions.len;
-
-        for (0..matching_len) |i| {
-            if (!Type.eql(left.versions[i], right.versions[i])) {
-                @compileError("encountered differing field types for object " ++ left.name ++
-                    "at version " ++ &[_]u8{i});
+        comptime {
+            var versions = left.versions;
+            outer: for (right.versions) |r| {
+                for (versions) |l| {
+                    if (Type.eql(l, r)) {
+                        continue :outer;
+                    }
+                }
+                versions = versions ++ &[_]Type{r};
             }
+            return Object{
+                .name = left.name,
+                .versions = versions,
+            };
         }
-
-        return left.versions.len == right.versions.len;
     }
 };
 
@@ -180,9 +172,7 @@ fn merge(comptime left: Self, comptime right: Self) Self {
         outer: for (right.objects) |right_obj| {
             for (left.objects, 0..) |left_obj, i| {
                 if (std.mem.eql(u8, left_obj.name, right_obj.name)) {
-                    if (!Object.eql(left_obj, right_obj)) {
-                        objects[i] = Object.merge(left_obj, right_obj);
-                    }
+                    objects[i] = Object.merge(left_obj, right_obj);
                     continue :outer;
                 }
             }
