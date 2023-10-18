@@ -1,5 +1,19 @@
 const std = @import("std");
 
+pub fn mergeTypes(comptime left: []const type, comptime right: []const type) []const type {
+    comptime {
+        var result = left;
+        outer: for (right) |Right| {
+            for (left) |Left| {
+                if (Left == Right)
+                    continue :outer;
+            }
+            result = result ++ &[_]type{Right};
+        }
+        return result;
+    }
+}
+
 pub fn Tuple(comptime types: anytype) type {
     comptime {
         var fields: [types.len]std.builtin.Type.StructField = undefined;
