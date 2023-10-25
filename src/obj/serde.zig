@@ -272,19 +272,19 @@ pub const MutateString = union(enum) {
     Append: []const u8,
     Prepend: []const u8,
     Insert: struct {
-        at: usize,
+        index: u64,
         str: []const u8,
     },
     Delete: struct {
-        at: usize,
-        len: usize,
+        index: u64,
+        len: u64,
     },
 };
 
 pub fn MutateArray(comptime info: def.Type.Array) type {
     return struct {
-        at: usize,
-        mut: MutateType(info.child.*),
+        index: u64,
+        elem: MutateType(info.child.*),
     };
 }
 
@@ -293,12 +293,12 @@ pub fn MutateList(comptime info: def.Type.List) type {
         Append: NewType(info.child.*),
         Prepend: NewType(info.child.*),
         Insert: struct {
-            at: usize,
+            index: u64,
             elem: NewType(info.child.*),
         },
-        Delete: usize,
+        Delete: u64,
         Mutate: struct {
-            at: usize,
+            index: u64,
             elem: MutateType(info.child.*),
         },
     };
