@@ -291,6 +291,86 @@ fn writeEnum(value: anytype, out: *std.ArrayList(u8)) !usize {
     return try writePacked(@intFromEnum(value), null, out);
 }
 
+pub fn writeAdapted(comptime Type: type, adapter: anytype, out: *std.ArrayList(u8)) !void {
+    _ = try writeValueAdapted(Type, adapter, out);
+}
+
+fn writeValueAdapted(comptime Type: type, adapter: anytype, out: *std.ArrayList(u8)) std.mem.Allocator.Error!usize {
+    return switch (@typeInfo(Type)) {
+        .Void => {},
+        .Bool, .Int, .Float => try writePacked(try adapter.value(), null, out),
+        .Pointer => |info| switch (info.size) {
+            .One => try writeValueAdapted(info.child, adapter, out),
+            .Slice => try writePacked(try adapter.len(), null, out) + try writeSliceAdapted(info.child, adapter, try adapter.len(), out),
+            else => @compileError("unsupported pointer type"),
+        },
+        .Array => |info| try writeSliceAdapted(info.child, adapter, info.len, out),
+        .Struct => try writeStructAdapted(Type, adapter, out),
+        .Optional => |info| if (try adapter.value()) |v|
+            try writePacked(@as(u8, 1), null, out) + try writeValueAdapted(info.child, v, out)
+        else
+            try writePacked(@as(u8, 0), null, out),
+        .Enum => try writeEnum(try adapter.value(), out),
+        .Union => try writeUnionAdapted(Type, adapter, out),
+        else => @compileError("unsupported type"),
+    };
+}
+
+fn writeSliceAdapted(comptime Elem: type, adapter: anytype, len: usize, out: *std.ArrayList(u8)) !usize {
+    var size: usize = 0;
+    if (comptime typeHasFixedSize(Elem)) {
+        for (0..len) |i| {
+            size += try writeValueAdapted(Elem, try adapter.elem(i), out);
+        }
+    } else {
+        var sizes_start = out.items.len;
+
+        const sizes_size = len * @sizeOf(usize);
+        try out.appendNTimes(0, sizes_size);
+        size += sizes_size;
+
+        for (0..len) |i| {
+            const elem_size = try writeValueAdapted(Elem, try adapter.elem(i), out);
+            size += elem_size;
+
+            const size_offset = sizes_start + (i * @sizeOf(usize));
+            _ = try writePacked(elem_size, size_offset, out);
+        }
+    }
+    return size;
+}
+
+fn writeStructAdapted(comptime Struct: type, adapter: anytype, out: *std.ArrayList(u8)) !usize {
+    const info = @typeInfo(Struct).Struct;
+
+    var size: usize = 0;
+    inline for (info.fields, 0..) |field, i| {
+        if (comptime typeHasFixedSize(field.type)) {
+            size += try writeValueAdapted(field.type, try adapter.field(i), out);
+        } else {
+            const size_offset = out.items.len;
+            size += try writePacked(@as(usize, 0), null, out);
+
+            const field_size = try writeValueAdapted(field.type, try adapter.field(i), out);
+            _ = try writePacked(field_size, size_offset, out);
+            size += field_size;
+        }
+    }
+    return size;
+}
+
+fn writeUnionAdapted(comptime Union: type, adapter: anytype, out: *std.ArrayList(u8)) !usize {
+    const info = @typeInfo(Union).Union;
+    switch (try adapter.tag()) {
+        inline else => |tag| {
+            const field_type = info.fields[@intFromEnum(tag)].type;
+            var size = try writeEnum(tag, out);
+            size = try writeValueAdapted(field_type, try adapter.value(tag), out);
+            return size;
+        },
+    }
+}
+
 fn writePacked(value: anytype, at: ?usize, out: *std.ArrayList(u8)) !usize {
     const Type = @TypeOf(value);
     var bytes: []const u8 = undefined;
@@ -323,17 +403,287 @@ fn typeHasFixedSize(comptime Type: type) bool {
     };
 }
 
-fn Serde(comptime Type: type) type {
-    return struct {
-        view: View(Type),
-        bytes: []const u8,
+test "bool serde" {
+    try expectSerdeValue(true);
+    try expectSerdeValue(false);
 
-        const Self = @This();
+    try expectSerdeAdaptedValue(true);
+    try expectSerdeAdaptedValue(false);
+}
 
-        fn deinit(self: Self) void {
-            std.testing.allocator.free(self.bytes);
+test "int serde" {
+    try expectSerdeValue(@as(u8, 10));
+    try expectSerdeValue(@as(i8, -10));
+    try expectSerdeValue(@as(u16, 20));
+    try expectSerdeValue(@as(i16, -20));
+    try expectSerdeValue(@as(u32, 30));
+    try expectSerdeValue(@as(i32, -30));
+    try expectSerdeValue(@as(u64, 40));
+    try expectSerdeValue(@as(i64, -40));
+    try expectSerdeValue(@as(u89, 50));
+    try expectSerdeValue(@as(i89, -50));
+
+    try expectSerdeAdaptedValue(@as(u8, 10));
+    try expectSerdeAdaptedValue(@as(i8, -10));
+    try expectSerdeAdaptedValue(@as(u16, 20));
+    try expectSerdeAdaptedValue(@as(i16, -20));
+    try expectSerdeAdaptedValue(@as(u32, 30));
+    try expectSerdeAdaptedValue(@as(i32, -30));
+    try expectSerdeAdaptedValue(@as(u64, 40));
+    try expectSerdeAdaptedValue(@as(i64, -40));
+    try expectSerdeAdaptedValue(@as(u89, 50));
+    try expectSerdeAdaptedValue(@as(i89, -50));
+}
+
+test "float serde" {
+    try expectSerdeValue(@as(f16, -10.0));
+    try expectSerdeValue(@as(f32, 10.0));
+    try expectSerdeValue(@as(f64, -20.0));
+    try expectSerdeValue(@as(f80, 20.0));
+    try expectSerdeValue(@as(f128, -30.0));
+
+    try expectSerdeAdaptedValue(@as(f16, -10.0));
+    try expectSerdeAdaptedValue(@as(f32, 10.0));
+    try expectSerdeAdaptedValue(@as(f64, -20.0));
+    try expectSerdeAdaptedValue(@as(f80, 20.0));
+    try expectSerdeAdaptedValue(@as(f128, -30.0));
+}
+
+test "pointer serde" {
+    const exp = struct {
+        const value: *const u32 = &100;
+
+        fn check(result: anytype) !void {
+            defer result.deinit();
+            try std.testing.expectEqual(value.*, result.view);
         }
     };
+
+    try exp.check(try serde(exp.value));
+    try exp.check(try serdeAdapted(exp.value));
+}
+
+test "slice serde" {
+    const exp = struct {
+        const values: []const u32 = &[_]u32{ 10, 50, 100, 150, 200 };
+
+        fn check(result: anytype) !void {
+            defer result.deinit();
+            try std.testing.expectEqual(values.len, result.view.len());
+            for (values, 0..) |val, i| {
+                try std.testing.expectEqual(val, result.view.elem(i));
+            }
+        }
+    };
+
+    try exp.check(try serde(exp.values));
+    try exp.check(try serdeAdapted(exp.values));
+}
+
+test "slice of slices serde" {
+    const exp = struct {
+        const values: []const []const u32 = &[_][]const u32{
+            &[_]u32{ 10, 20 },
+            &[_]u32{ 30, 40, 50 },
+            &[_]u32{ 60, 70, 80, 90 },
+        };
+
+        fn check(result: Serde(@TypeOf(values))) !void {
+            defer result.deinit();
+
+            try std.testing.expectEqual(values.len, result.view.len());
+            for (0..values.len) |i| {
+                const inner_values = values[i];
+                const inner_result = result.view.elem(i);
+                try std.testing.expectEqual(inner_values.len, inner_result.len());
+                for (inner_values, 0..) |val, ii| {
+                    try std.testing.expectEqual(val, inner_result.elem(ii));
+                }
+            }
+        }
+    };
+
+    try exp.check(try serde(exp.values));
+    try exp.check(try serdeAdapted(exp.values));
+}
+
+test "array serde" {
+    const exp = struct {
+        const values = [_]u32{ 10, 20, 30, 40, 50, 60, 70, 80, 90 };
+        fn check(result: Serde(@TypeOf(values))) !void {
+            defer result.deinit();
+
+            for (values, 0..) |val, i| {
+                try std.testing.expectEqual(val, result.view.elem(i));
+            }
+        }
+    };
+
+    try exp.check(try serde(exp.values));
+    try exp.check(try serdeAdapted(exp.values));
+}
+
+test "array of slices" {
+    const exp = struct {
+        const values = [_][]const u32{
+            &[_]u32{ 10, 20 },
+            &[_]u32{ 30, 40, 50 },
+            &[_]u32{ 60, 70, 80, 90 },
+        };
+
+        fn check(result: Serde(@TypeOf(values))) !void {
+            defer result.deinit();
+            for (values, 0..) |slice, i| {
+                const result_slice = result.view.elem(i);
+                try std.testing.expectEqual(slice.len, result_slice.len());
+                for (slice, 0..) |val, ii| {
+                    try std.testing.expectEqual(val, result_slice.elem(ii));
+                }
+            }
+        }
+    };
+
+    try exp.check(try serde(exp.values));
+    try exp.check(try serdeAdapted(exp.values));
+}
+
+test "struct serde" {
+    const exp = struct {
+        const value: struct {
+            f0: bool = true,
+            f1: u16 = 20,
+            f2: u89 = 30,
+            f3: f32 = 100.9,
+        } = .{};
+
+        fn check(result: Serde(@TypeOf(value))) !void {
+            defer result.deinit();
+            try std.testing.expectEqual(value.f0, result.view.field(.f0));
+            try std.testing.expectEqual(value.f1, result.view.field(.f1));
+            try std.testing.expectEqual(value.f2, result.view.field(.f2));
+            try std.testing.expectEqual(value.f3, result.view.field(.f3));
+        }
+    };
+
+    try exp.check(try serde(exp.value));
+    try exp.check(try serdeAdapted(exp.value));
+}
+
+test "struct with slices" {
+    const exp = struct {
+        const value: struct {
+            f0: bool = true,
+            f1: []const u32 = &.{ 10, 20, 30, 40 },
+            f2: u89 = 100,
+            f3: []const f32 = &.{ 0.99, 1.101, 2.02 },
+            f4: struct {
+                f0: bool = false,
+                f1: []const u8 = &.{ 0, 100, 200 },
+                f2: u128 = 100078230111,
+                f3: []const struct {
+                    f0: []const u8,
+                } = &.{
+                    .{ .f0 = &.{ 10, 20, 30 } },
+                    .{ .f0 = &.{ 40, 50, 60 } },
+                    .{ .f0 = &.{ 70, 80, 90 } },
+                },
+            } = .{},
+        } = .{};
+
+        fn check(result: Serde(@TypeOf(value))) !void {
+            defer result.deinit();
+
+            try std.testing.expectEqual(value.f0, result.view.field(.f0));
+            for (value.f1, 0..) |val, i| {
+                try std.testing.expectEqual(val, result.view.field(.f1).elem(i));
+            }
+            try std.testing.expectEqual(value.f2, result.view.field(.f2));
+            for (value.f3, 0..) |val, i| {
+                try std.testing.expectEqual(val, result.view.field(.f3).elem(i));
+            }
+            try std.testing.expectEqual(value.f4.f0, result.view.field(.f4).field(.f0));
+            for (value.f4.f1, 0..) |val, i| {
+                try std.testing.expectEqual(val, result.view.field(.f4).field(.f1)[i]);
+            }
+            try std.testing.expectEqual(value.f4.f2, result.view.field(.f4).field(.f2));
+            try std.testing.expectEqual(value.f4.f3.len, result.view.field(.f4).field(.f3).len());
+            for (value.f4.f3, 0..) |val, i| {
+                const result_inner = result.view.field(.f4).field(.f3).elem(i);
+                try std.testing.expectEqual(val.f0.len, result_inner.field(.f0).len);
+                for (val.f0, 0..) |val2, ii| {
+                    try std.testing.expectEqual(val2, result_inner.field(.f0)[ii]);
+                }
+            }
+        }
+    };
+
+    try exp.check(try serde(exp.value));
+    try exp.check(try serdeAdapted(exp.value));
+}
+
+test "optional serde" {
+    try expectSerdeValue(@as(?bool, null));
+    try expectSerdeValue(@as(?bool, true));
+    try expectSerdeValue(@as(?f32, null));
+    try expectSerdeValue(@as(?f32, 101.8721));
+
+    try expectSerdeAdaptedValue(@as(?bool, null));
+    try expectSerdeAdaptedValue(@as(?bool, true));
+    try expectSerdeAdaptedValue(@as(?f32, null));
+    try expectSerdeAdaptedValue(@as(?f32, 101.8721));
+}
+
+test "unsized enum serde" {
+    const Enum = enum {
+        Field1,
+        Field2,
+    };
+
+    try expectSerdeValue(Enum.Field1);
+    try expectSerdeValue(Enum.Field2);
+
+    try expectSerdeAdaptedValue(Enum.Field1);
+    try expectSerdeAdaptedValue(Enum.Field2);
+}
+
+test "sized enum serde" {
+    const Enum = enum(u24) {
+        Field1 = 100,
+        Field2 = 10000,
+    };
+
+    try expectSerdeValue(Enum.Field1);
+    try expectSerdeValue(Enum.Field2);
+
+    try expectSerdeAdaptedValue(Enum.Field1);
+    try expectSerdeAdaptedValue(Enum.Field2);
+}
+
+test "tagged union serde" {
+    const exp = struct {
+        const Tag = enum {
+            Tag1,
+            Tag2,
+            Tag3,
+        };
+        const value: union(Tag) {
+            Tag1: u16,
+            Tag2: f32,
+            Tag3: u64,
+        } = .{
+            .Tag2 = 10.1891,
+        };
+
+        fn check(result: Serde(@TypeOf(value))) !void {
+            defer result.deinit();
+
+            try std.testing.expectEqual(Tag.Tag2, result.view.tag());
+            try std.testing.expectEqual(value.Tag2, result.view.value(.Tag2));
+        }
+    };
+
+    try exp.check(try serde(exp.value));
+    try exp.check(try serdeAdapted(exp.value));
 }
 
 fn serde(value: anytype) !Serde(@TypeOf(value)) {
@@ -347,209 +697,173 @@ fn serde(value: anytype) !Serde(@TypeOf(value)) {
     };
 }
 
+fn serdeAdapted(value: anytype) !Serde(@TypeOf(value)) {
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+
+    const Type = @TypeOf(value);
+    try writeAdapted(Type, Adapter(Type).init(value), &out);
+
+    const bytes = try out.toOwnedSlice();
+    return .{
+        .view = read(Type, bytes),
+        .bytes = bytes,
+    };
+}
+
 fn expectSerdeValue(value: anytype) !void {
     const result = try serde(value);
     defer result.deinit();
     try std.testing.expectEqual(value, result.view);
 }
 
-test "bool serde" {
-    try expectSerdeValue(true);
-    try expectSerdeValue(false);
-}
-
-test "int serde" {
-    try expectSerdeValue(@as(i8, -10));
-    try expectSerdeValue(@as(i16, -20));
-    try expectSerdeValue(@as(i32, -30));
-    try expectSerdeValue(@as(i64, -40));
-    try expectSerdeValue(@as(i89, -50));
-
-    try expectSerdeValue(@as(u8, 10));
-    try expectSerdeValue(@as(u16, 20));
-    try expectSerdeValue(@as(u32, 30));
-    try expectSerdeValue(@as(u64, 40));
-    try expectSerdeValue(@as(u89, 50));
-}
-
-test "float serde" {
-    try expectSerdeValue(@as(f16, -10.0));
-    try expectSerdeValue(@as(f32, 10.0));
-    try expectSerdeValue(@as(f64, -20.0));
-    try expectSerdeValue(@as(f80, 20.0));
-    try expectSerdeValue(@as(f128, -30.0));
-}
-
-test "pointer serde" {
-    const value: u32 = 100;
-    const result = try serde(&value);
+fn expectSerdeAdaptedValue(value: anytype) !void {
+    const result = try serdeAdapted(value);
     defer result.deinit();
-
     try std.testing.expectEqual(value, result.view);
 }
 
-test "slice serde" {
-    const values: []const u32 = &[_]u32{ 10, 50, 100, 150, 200 };
-    const result = try serde(values);
-    defer result.deinit();
+fn Serde(comptime Type: type) type {
+    return struct {
+        view: View(Type),
+        bytes: []const u8,
 
-    try std.testing.expectEqual(values.len, result.view.len());
-    for (values, 0..) |val, i| {
-        try std.testing.expectEqual(val, result.view.elem(i));
-    }
-}
+        const Self = @This();
 
-test "slice of slices serde" {
-    const values: []const []const u32 = &[_][]const u32{
-        &[_]u32{ 10, 20 },
-        &[_]u32{ 30, 40, 50 },
-        &[_]u32{ 60, 70, 80, 90 },
-    };
-    const result = try serde(values);
-    defer result.deinit();
-
-    try std.testing.expectEqual(values.len, result.view.len());
-    for (0..values.len) |i| {
-        const inner_values = values[i];
-        const inner_result = result.view.elem(i);
-        try std.testing.expectEqual(inner_values.len, inner_result.len());
-        for (inner_values, 0..) |val, ii| {
-            try std.testing.expectEqual(val, inner_result.elem(ii));
+        fn deinit(self: Self) void {
+            std.testing.allocator.free(self.bytes);
         }
-    }
-}
-
-test "array serde" {
-    const values = [_]u32{ 10, 20, 30, 40, 50, 60, 70, 80, 90 };
-    const result = try serde(values);
-    defer result.deinit();
-
-    for (values, 0..) |val, i| {
-        try std.testing.expectEqual(val, result.view.elem(i));
-    }
-}
-
-test "array of slices" {
-    const values = [_][]const u32{
-        &[_]u32{ 10, 20 },
-        &[_]u32{ 30, 40, 50 },
-        &[_]u32{ 60, 70, 80, 90 },
     };
-    const result = try serde(values);
-    defer result.deinit();
+}
 
-    for (values, 0..) |slice, i| {
-        const result_slice = result.view.elem(i);
-        try std.testing.expectEqual(slice.len, result_slice.len());
-        for (slice, 0..) |val, ii| {
-            try std.testing.expectEqual(val, result_slice.elem(ii));
+fn Adapter(comptime Type: type) type {
+    return switch (@typeInfo(Type)) {
+        .Void, .Bool, .Int, .Float, .Enum => ValueAdapter(Type),
+        .Pointer => |info| switch (info.size) {
+            .One => PointerAdapter(info.child),
+            .Slice => SliceAdapter(info.child),
+            else => @compileError(""),
+        },
+        .Array => |info| ArrayAdapter(info.child, info.len),
+        .Struct => StructAdapter(Type),
+        .Optional => |info| OptionalAdapter(info.child),
+        .Union => UnionAdapter(Type),
+        else => @compileError("unsupported type"),
+    };
+}
+
+fn ValueAdapter(comptime Type: type) type {
+    return struct {
+        val: Type,
+
+        fn init(val: Type) @This() {
+            return .{ .val = val };
         }
-    }
-}
 
-test "struct serde" {
-    const value: struct {
-        f0: bool = true,
-        f1: u16 = 20,
-        f2: u89 = 30,
-        f3: f32 = 100.9,
-    } = .{};
-    const result = try serde(value);
-    defer result.deinit();
-
-    try std.testing.expectEqual(value.f0, result.view.field(.f0));
-    try std.testing.expectEqual(value.f1, result.view.field(.f1));
-    try std.testing.expectEqual(value.f2, result.view.field(.f2));
-    try std.testing.expectEqual(value.f3, result.view.field(.f3));
-}
-
-test "struct with slices" {
-    const value: struct {
-        f0: bool = true,
-        f1: []const u32 = &.{ 10, 20, 30, 40 },
-        f2: u89 = 100,
-        f3: []const f32 = &.{ 0.99, 1.101, 2.02 },
-        f4: struct {
-            f0: bool = false,
-            f1: []const u8 = &.{ 0, 100, 200 },
-            f2: u128 = 100078230111,
-            f3: []const struct {
-                f0: []const u8,
-            } = &.{
-                .{ .f0 = &.{ 10, 20, 30 } },
-                .{ .f0 = &.{ 40, 50, 60 } },
-                .{ .f0 = &.{ 70, 80, 90 } },
-            },
-        } = .{},
-    } = .{};
-
-    const result = try serde(value);
-    defer result.deinit();
-
-    try std.testing.expectEqual(value.f0, result.view.field(.f0));
-    for (value.f1, 0..) |val, i| {
-        try std.testing.expectEqual(val, result.view.field(.f1).elem(i));
-    }
-    try std.testing.expectEqual(value.f2, result.view.field(.f2));
-    for (value.f3, 0..) |val, i| {
-        try std.testing.expectEqual(val, result.view.field(.f3).elem(i));
-    }
-    try std.testing.expectEqual(value.f4.f0, result.view.field(.f4).field(.f0));
-    for (value.f4.f1, 0..) |val, i| {
-        try std.testing.expectEqual(val, result.view.field(.f4).field(.f1)[i]);
-    }
-    try std.testing.expectEqual(value.f4.f2, result.view.field(.f4).field(.f2));
-    try std.testing.expectEqual(value.f4.f3.len, result.view.field(.f4).field(.f3).len());
-    for (value.f4.f3, 0..) |val, i| {
-        const result_inner = result.view.field(.f4).field(.f3).elem(i);
-        try std.testing.expectEqual(val.f0.len, result_inner.field(.f0).len);
-        for (val.f0, 0..) |val2, ii| {
-            try std.testing.expectEqual(val2, result_inner.field(.f0)[ii]);
+        fn value(self: @This()) !Type {
+            return self.val;
         }
-    }
+    };
 }
 
-test "optional serde" {
-    try expectSerdeValue(@as(?bool, null));
-    try expectSerdeValue(@as(?bool, true));
-    try expectSerdeValue(@as(?f32, null));
-    try expectSerdeValue(@as(?f32, 101.8721));
+fn PointerAdapter(comptime Child: type) type {
+    return struct {
+        val: *const Child,
+
+        fn init(val: *const Child) @This() {
+            return .{ .val = val };
+        }
+
+        fn value(self: @This()) !Child {
+            return self.val.*;
+        }
+    };
 }
 
-test "unsized enum serde" {
-    const Enum = enum {
-        Field1,
-        Field2,
+fn SliceAdapter(comptime Element: type) type {
+    return struct {
+        values: []const Element,
+
+        fn init(values: []const Element) @This() {
+            return .{ .values = values };
+        }
+
+        fn len(self: @This()) !usize {
+            return self.values.len;
+        }
+
+        fn elem(self: @This(), i: usize) !Adapter(Element) {
+            return Adapter(Element).init(self.values[i]);
+        }
     };
-    try expectSerdeValue(Enum.Field1);
-    try expectSerdeValue(Enum.Field2);
 }
 
-test "sized enum serde" {
-    const Enum = enum(u24) {
-        Field1 = 100,
-        Field2 = 10000,
+fn ArrayAdapter(comptime Element: type, comptime size: comptime_int) type {
+    return struct {
+        values: [size]Element,
+
+        fn init(values: [size]Element) @This() {
+            return .{ .values = values };
+        }
+
+        fn elem(self: @This(), i: usize) !Adapter(Element) {
+            return Adapter(Element).init(self.values[i]);
+        }
     };
-    try expectSerdeValue(Enum.Field1);
-    try expectSerdeValue(Enum.Field2);
 }
 
-test "tagged union serde" {
-    const Tag = enum {
-        Tag1,
-        Tag2,
-        Tag3,
-    };
-    const value: union(Tag) {
-        Tag1: u16,
-        Tag2: f32,
-        Tag3: u64,
-    } = .{
-        .Tag2 = 10.1891,
-    };
-    const result = try serde(value);
-    defer result.deinit();
+fn StructAdapter(comptime Struct: type) type {
+    return struct {
+        val: Struct,
 
-    try std.testing.expectEqual(Tag.Tag2, result.view.tag());
-    try std.testing.expectEqual(value.Tag2, result.view.value(.Tag2));
+        const fields = @typeInfo(Struct).Struct.fields;
+
+        fn init(val: Struct) @This() {
+            return .{ .val = val };
+        }
+
+        fn field(self: @This(), comptime field_index: comptime_int) !Adapter(fields[field_index].type) {
+            const f = fields[field_index];
+            return Adapter(f.type).init(@field(self.val, f.name));
+        }
+    };
+}
+
+fn OptionalAdapter(comptime Child: type) type {
+    return struct {
+        child: ?Child,
+
+        fn init(child: ?Child) @This() {
+            return .{ .child = child };
+        }
+
+        fn value(self: @This()) !?Adapter(Child) {
+            if (self.child) |child| {
+                return Adapter(Child).init(child);
+            }
+            return null;
+        }
+    };
+}
+
+fn UnionAdapter(comptime Union: type) type {
+    return struct {
+        val: Union,
+
+        const Tag = std.meta.Tag(Union);
+        fn Payload(comptime t: Tag) type {
+            return std.meta.TagPayload(Union, t);
+        }
+
+        fn init(val: Union) @This() {
+            return .{ .val = val };
+        }
+
+        fn tag(self: @This()) !Tag {
+            return self.val;
+        }
+
+        fn value(self: @This(), comptime t: Tag) !Adapter(Payload(t)) {
+            return Adapter(Payload(t)).init(@field(self.val, @tagName(t)));
+        }
+    };
 }
