@@ -20,4 +20,5 @@ test {
     _ = @import("def/Type.zig");
     _ = @import("chan/channel.zig");
     _ = @import("chan/serde.zig");
+    _ = @import("obj/serde.zig");
 }

@@ -3,8 +3,9 @@ const chan = @import("../lib.zig").chan;
 const def = @import("../lib.zig").def;
 const meta = @import("../meta.zig");
 
-pub fn UpdateObject(comptime object: def.ObjectScheme.Object) type {
-    const New = NewType(object);
+pub fn UpdateObject(comptime Index: type, comptime scheme_id: comptime_int, comptime obj_id: comptime_int) type {
+    const object = Index.schemes[scheme_id].objects[obj_id];
+    const New = NewObject(object);
     const Mutate = MutateObject(object);
     return @Type(.{
         .Union = .{
@@ -45,19 +46,13 @@ pub fn UpdateObject(comptime object: def.ObjectScheme.Object) type {
 
 pub fn NewObject(comptime object: def.ObjectScheme.Object) type {
     var tag_fields: [object.versions.len + 1]std.builtin.Type.EnumField = undefined;
-    for (0..object.versions.len) |i| {
+    var union_fields: [tag_fields.len]std.builtin.Type.UnionField = undefined;
+    for (object.versions, 0..) |ver, i| {
         tag_fields[i] = .{
             .name = "V" ++ meta.numFieldName(i + 1),
             .value = i,
         };
-    }
-    tag_fields[object.versions.len] = .{
-        .name = "Unknown",
-        .value = object.versions.len,
-    };
 
-    var union_fields: [tag_fields.len]std.builtin.Type.UnionField = undefined;
-    for (object.versions, 0..) |ver, i| {
         const Type = NewType(ver);
         union_fields[i] = .{
             .name = tag_fields[i].name,
@@ -65,11 +60,18 @@ pub fn NewObject(comptime object: def.ObjectScheme.Object) type {
             .alignment = @alignOf(Type),
         };
     }
-    union_fields[object.versions.len] = .{
+
+    const i = object.versions.len;
+    tag_fields[i] = .{
         .name = "Unknown",
+        .value = object.versions.len,
+    };
+    union_fields[i] = .{
+        .name = tag_fields[i].name,
         .type = void,
         .alignment = @alignOf(void),
     };
+
     return @Type(.{
         .Union = .{
             .layout = .Auto,
@@ -96,8 +98,9 @@ pub fn NewType(comptime typ: def.Type) type {
             .Int = .{
                 .signedness = switch (info.signedness) {
                     .signed => .signed,
-                    .bits => info.bits,
+                    .unsigned => .unsigned,
                 },
+                .bits = info.bits,
             },
         }),
         .Float => |info| @Type(.{
@@ -221,15 +224,13 @@ pub fn NewType(comptime typ: def.Type) type {
 
 pub fn MutateObject(comptime object: def.ObjectScheme.Object) type {
     var tag_fields: [object.versions.len]std.builtin.Type.EnumField = undefined;
-    for (0..object.versions.len) |i| {
+    var union_fields: [tag_fields.len]std.builtin.Type.UnionField = undefined;
+    for (object.versions, 0..) |ver, i| {
         tag_fields[i] = .{
             .name = "V" ++ meta.numFieldName(i + 1),
             .value = i,
         };
-    }
 
-    var union_fields: [tag_fields.len]std.builtin.Type.UnionField = undefined;
-    for (object.versions, 0..) |ver, i| {
         const Type = MutateType(ver);
         union_fields[i] = .{
             .name = tag_fields[i].name,
@@ -237,6 +238,7 @@ pub fn MutateObject(comptime object: def.ObjectScheme.Object) type {
             .alignment = @alignOf(Type),
         };
     }
+
     return @Type(.{
         .Union = .{
             .layout = .Auto,
@@ -259,7 +261,7 @@ pub fn MutateType(comptime typ: def.Type) type {
         .Void, .Bool, .Int, .Float, .Enum, .Ref => NewType(typ),
         .String => []const MutateString,
         .Optional => |info| ?MutateType(info.child.*),
-        .Array => |info| []const MutateArray(info),
+        .Array => |info| [info.len]?MutateType(info.child.*),
         .List => |info| []const MutateList(info),
         .Map => |info| []const MutateMap(info),
         .Struct => |info| MutateStruct(info),
@@ -280,13 +282,6 @@ pub const MutateString = union(enum) {
         len: u64,
     },
 };
-
-pub fn MutateArray(comptime info: def.Type.Array) type {
-    return struct {
-        index: u64,
-        elem: MutateType(info.child.*),
-    };
-}
 
 pub fn MutateList(comptime info: def.Type.List) type {
     return union(enum) {
@@ -396,4 +391,27 @@ pub fn MutateUnion(comptime info: def.Type.Union) type {
         .fields = &fields,
         .decls = &[_]std.builtin.Type.Declaration{},
     });
+}
+
+test {
+    const Scheme = def.Scheme("scheme", .{
+        def.Object("Obj", .{
+            bool,
+            u32,
+            def.Array(10, struct {}),
+        }),
+    });
+
+    const scheme = comptime def.ObjectScheme.from(Scheme(def.This));
+
+    const Index = struct {
+        const schemes = [_]def.ObjectScheme{
+            scheme,
+        };
+    };
+
+    const Update1 = UpdateObject(Index, 0, 0);
+    const Update2 = UpdateObject(Index, 0, 0);
+
+    try std.testing.expect(Update1 == Update2);
 }
