@@ -349,7 +349,6 @@ test "int type" {
         },
         Type.from(i8),
     );
-
     try expectTypeEql(
         .{
             .Int = .{
@@ -396,7 +395,7 @@ test "ref type" {
                 },
             },
         },
-        Type.from(Objs("Obj")),
+        Type.from(Objs.ref("Obj")),
     );
 }
 
@@ -477,7 +476,6 @@ test "tuple type" {
         Type.Bool,
         Type.String,
     };
-
     try expectTypeEql(
         .{
             .Tuple = .{
@@ -502,7 +500,6 @@ test "union type" {
             .type = Type.String,
         },
     };
-
     try expectTypeEql(
         .{
             .Union = .{

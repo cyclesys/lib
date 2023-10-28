@@ -224,7 +224,7 @@ test "object scheme" {
                 },
             },
         },
-        Self.from(Objs(define.This)),
+        Self.from(Objs),
     );
 }
 
@@ -238,7 +238,7 @@ test "object scheme dependencies" {
     const Dep2 = define.Scheme("scheme/dep2", .{
         define.Object("Obj", .{
             struct {
-                obj1: Dep1("Obj"),
+                obj1: Dep1.ref("Obj"),
             },
         }),
     });
@@ -246,8 +246,8 @@ test "object scheme dependencies" {
     const Objs = define.Scheme("scheme/objs", .{
         define.Object("One", .{
             struct {
-                obj1: Dep1("Obj"),
-                obj2: Dep2("Obj"),
+                obj1: Dep1.ref("Obj"),
+                obj2: Dep2.ref("Obj"),
             },
         }),
     });
@@ -293,7 +293,7 @@ test "object scheme dependencies" {
         },
     };
 
-    const deps = Self.dependencies(Objs(define.This));
+    const deps = Self.dependencies(Objs);
     inline for (deps, 0..) |dep, i| {
         const actual = Self.from(dep);
         try expectSelfEql(expected[i], actual);
@@ -319,16 +319,16 @@ test "object scheme merge" {
 
     const Dep2 = define.Scheme("scheme/dep2", .{
         define.Object("Obj", .{
-            DepOld("One"),
+            DepOld.ref("One"),
         }),
     });
 
     const Objs = define.Scheme("scheme/objs", .{
         define.Object("Obj", .{
             struct {
-                one: DepNew("One"),
-                two: DepNew("Two"),
-                obj: Dep2("Obj"),
+                one: DepNew.ref("One"),
+                two: DepNew.ref("Two"),
+                obj: Dep2.ref("Obj"),
             },
         }),
     });
@@ -374,7 +374,7 @@ test "object scheme merge" {
 
     const actual = comptime blk: {
         var schemes: []const Self = &[_]Self{};
-        for (Self.dependencies(Objs(define.This))) |dep| {
+        for (Self.dependencies(Objs)) |dep| {
             schemes = schemes ++ &[_]Self{Self.from(dep)};
         }
         break :blk Self.mergeSchemes(schemes);

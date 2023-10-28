@@ -14,9 +14,7 @@ const DefKind = enum {
     ignore,
 };
 
-pub const SchemeFn = fn (comptime anytype) type;
-
-pub fn Scheme(comptime scheme_name: []const u8, comptime scheme_types: anytype) SchemeFn {
+pub fn Scheme(comptime scheme_name: []const u8, comptime scheme_types: anytype) type {
     if (scheme_types.len == 0) {
         @compileError("`types` cannot be empty");
     }
@@ -63,11 +61,7 @@ pub fn Scheme(comptime scheme_name: []const u8, comptime scheme_types: anytype) 
 
         const Self = @This();
 
-        pub fn get(comptime arg: anytype) type {
-            if (@TypeOf(arg) == @TypeOf(This) and arg == This) {
-                return Self;
-            }
-
+        pub fn ref(comptime arg: []const u8) type {
             for (types) |Type| {
                 if (std.mem.eql(u8, Type.name, arg)) {
                     return struct {
@@ -80,7 +74,7 @@ pub fn Scheme(comptime scheme_name: []const u8, comptime scheme_types: anytype) 
 
             @compileError(arg ++ " is not defined in this scheme");
         }
-    }.get;
+    };
 }
 
 pub fn Object(comptime object_name: []const u8, comptime object_versions: anytype) type {
