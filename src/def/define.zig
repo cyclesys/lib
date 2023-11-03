@@ -62,11 +62,11 @@ pub fn Scheme(comptime scheme_name: []const u8, comptime scheme_types: anytype) 
         const Self = @This();
 
         pub fn ref(comptime arg: []const u8) type {
-            for (types) |Type| {
-                if (std.mem.eql(u8, Type.name, arg)) {
+            for (scheme_types) |Def| {
+                if (std.mem.eql(u8, Def.name, arg)) {
                     return struct {
                         pub const def_kind = DefKind.ref;
-                        pub const def = Type;
+                        pub const def = Def;
                         pub const scheme = Self;
                     };
                 }

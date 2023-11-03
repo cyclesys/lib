@@ -1,19 +1,22 @@
 const std = @import("std");
+const chan = @import("../lib.zig").chan;
 const def = @import("../lib.zig").def;
 const meta = @import("../meta.zig");
 const serde = @import("serde.zig");
 
-pub fn WriteObject(comptime object: def.ObjectScheme.Object) type {
+pub fn WriteUpdateObject(comptime ObjectRef: type) type {
     return struct {
         allocator: std.mem.Allocator,
-        object: ?Object,
+        value: ?UpdateObject,
 
-        pub const Object = union(enum) {
+        pub const UpdateObject = union(Tag) {
             New: New,
             Mutate: Mutate,
         };
-        pub const New = WriteNewObject(object);
-        pub const Mutate = WriteMutateObject(object);
+        pub const New = WriteNewObject(Object);
+        pub const Mutate = WriteMutateObject(Object);
+        const Tag = std.meta.Tag(serde.UpdateObject(ObjectRef));
+        const Object = ObjectRef.def;
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -24,151 +27,76 @@ pub fn WriteObject(comptime object: def.ObjectScheme.Object) type {
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.object) |*obj| {
-                switch (obj) {
-                    .New => |*n| deinitNewObject(n),
-                    .Mutate => |*m| deinitMutateObject(m),
+            if (self.value) |*val| {
+                switch (val.*) {
+                    .New => |*n| deinitNewObject(self.allocator, Object, n),
+                    .Mutate => |*m| deinitMutateObject(self.allocator, Object, m),
                 }
             }
         }
 
         pub fn new(self: *Self) *New {
-            if (self.object) |*obj| {
-                switch (obj) {
+            if (self.value) |*val| {
+                switch (val.*) {
                     .New => |*n| return n,
-                    .Mutate => |*m| deinitMutateObject(self.allocator, object, m),
+                    .Mutate => |*m| deinitMutateObject(self.allocator, Object, m),
                 }
             }
 
-            if (comptime newObjectAllocates(object)) {
-                self.object = Object{ .New = New.init(self.allocator) };
+            if (comptime objectAllocates(Object, newTypeAllocates)) {
+                self.value = UpdateObject{ .New = New.init(self.allocator) };
             } else {
-                self.object = Object{ .New = New.init(undefined) };
+                self.value = UpdateObject{ .New = New.init(undefined) };
             }
 
-            return &self.object.?.New;
+            return &self.value.?.New;
         }
 
         pub fn mutate(self: *Self) *Mutate {
-            if (self.object) |*obj| {
-                switch (obj) {
+            if (self.value) |*val| {
+                switch (val) {
                     .New => |*n| deinitNewType(n),
                     .Mutate => |*m| return m,
                 }
             }
 
-            if (comptime mutateObjectAllocates(object)) {
-                self.object = Object{ .Mutate = Mutate.init(self.allocator) };
+            if (comptime objectAllocates(Object, mutateTypeAllocates)) {
+                self.value = UpdateObject{ .Mutate = Mutate.init(self.allocator) };
             } else {
-                self.object = Object{ .Mutate = Mutate.init(undefined) };
+                self.value = UpdateObject{ .Mutate = Mutate.init(undefined) };
             }
 
-            return &self.object.?.Mutate;
+            return &self.value.?.Mutate;
         }
     };
 }
 
-pub fn WriteNewObject(comptime object: def.ObjectScheme.Object) type {
-    return struct {
-        allocator: Allocator,
-        version: ?Version,
-
-        pub const Version = blk: {
-            var tag_fields: [object.versions.len]std.builtin.Type.EnumField = undefined;
-            var union_fields: [tag_fields.len]std.builtin.Type.UnionField = undefined;
-            for (object.versions, 0..) |ver, i| {
-                tag_fields[i] = .{
-                    .name = "V" ++ meta.numFieldName(i),
-                    .value = i,
-                };
-
-                const Type = WriteNewType(ver);
-                union_fields[i] = .{
-                    .name = tag_fields[i].name,
-                    .type = Type,
-                    .alignment = @alignOf(Type),
-                };
-            }
-            break :blk @Type(.{
-                .Union = .{
-                    .layout = .Auto,
-                    .tag_type = @Type(.{
-                        .Enum = .{
-                            .tag_type = std.math.IntFittingRange(0, tag_fields - 1),
-                            .fields = &tag_fields,
-                            .decls = &[_]std.builtin.Type.Declaration{},
-                            .is_exhaustive = true,
-                        },
-                    }),
-                    .fields = &union_fields,
-                    .decls = &[_]std.builtin.Type.Declaration{},
-                },
-            });
-        };
-        const Allocator = if (newObjectAllocates(object)) std.mem.Allocator else void;
-        const Self = @This();
-
-        pub fn init(allocator: Allocator) Self {
-            return Self{
-                .allocator = allocator,
-                .version = null,
-            };
-        }
-
-        pub fn version(self: *Self, comptime num: comptime_int) *WriteNewType(object.versions[num]) {
-            const field_name = "V" ++ meta.numFieldName(num);
-            const field_type = object.versions[num];
-            if (self.version) |ver| {
-                switch (ver) {
-                    inline else => |val, tag| {
-                        if (@intFromEnum(tag) == num) {
-                            return &@field(self.version, field_name);
-                        }
-                        if (comptime newTypeAllocates(field_type)) {
-                            deinitNewType(self.allocator, field_type, val);
-                        }
-                    },
-                }
-            }
-
-            const FieldType = WriteNewType(field_type);
-            if (comptime typeTakesAllocator(field_type)) {
-                if (comptime newTypeAllocates(field_type)) {
-                    self.version = @unionInit(Version, field_name, FieldType.init(self.allocator));
-                } else {
-                    self.version = @unionInit(Version, field_name, FieldType.init(undefined));
-                }
-            } else {
-                self.version = @unionInit(Version, field_name, FieldType.init());
-            }
-
-            return &@field(self.version, field_name);
-        }
-    };
+fn WriteNewObject(comptime Object: type) type {
+    return WriteObject(Object, WriteNewType, newTypeAllocates, deinitNewType);
 }
 
-pub fn WriteNewType(comptime typ: def.Type) type {
-    return switch (typ) {
-        .Void => WriteVoid,
-        .Bool => WriteBool,
+fn WriteNewType(comptime Type: type) type {
+    return switch (def.Type.from(Type).?) {
+        .Void => WriteValue(void),
+        .Bool => WriteValue(bool),
+        .Int => WriteValue(Type),
+        .Float => WriteValue(Type),
         .String => WriteNewString,
-        .Int => |info| WriteInt(info),
-        .Float => |info| WriteFloat(info),
-        .Optional => |info| WriteNewOptional(info),
-        .Array => |info| WriteNewArray(info),
-        .List => |info| WriteNewList(info),
-        .Map => |info| WriteNewMap(info),
-        .Struct => |info| WriteNewStruct(info),
-        .Tuple => |info| WriteNewTuple(info),
-        .Union => |info| WriteNewUnion(info),
-        .Enum => |info| WriteEnum(info),
-        .Ref => WriteRef,
+        .Optional => WriteNewOptional(Type),
+        .Array => WriteNewArray(Type),
+        .List => WriteNewList(Type),
+        .Map => WriteNewMap(Type),
+        .Struct => WriteNewStruct(Type),
+        .Tuple => WriteNewTuple(Type),
+        .Union => WriteNewUnion(Type),
+        .Enum => WriteValue(Type),
+        .Ref => WriteValue(def.ObjectId),
     };
 }
 
-pub const WriteNewString = struct {
+const WriteNewString = struct {
     allocator: std.mem.Allocator,
-    str: ?[]const u8,
+    value: ?[]const u8,
 
     pub fn init(allocator: std.mem.Allocator) WriteNewString {
         return WriteNewString{
@@ -185,34 +113,34 @@ pub const WriteNewString = struct {
     }
 };
 
-pub fn WriteNewOptional(comptime info: def.Type.Optional) type {
-    return WriteOptional(info, WriteNewType, newTypeAllocates);
+fn WriteNewOptional(comptime Type: type) type {
+    return WriteOptional(Type, WriteNewType, newTypeAllocates);
 }
 
-pub fn WriteNewArray(comptime info: def.Type.Array) type {
+fn WriteNewArray(comptime Type: type) type {
     return struct {
         allocator: Allocator,
-        elems: [info.len]?Element,
+        elems: [Type.len]?Element,
 
-        pub const Element = WriteNewType(info.child.*);
-        const Allocator = if (newTypeAllocates(info.child.*)) std.mem.Allocator else void;
+        pub const Element = WriteNewType(Type.child);
+        const Allocator = if (newTypeAllocates(Type.child)) std.mem.Allocator else void;
         const Self = @This();
 
         pub fn init(allocator: Allocator) Self {
             return Self{
                 .allocator = allocator,
-                .elems = [_]?Element{null} ** info.len,
+                .elems = [_]?Element{null} ** Type.len,
             };
         }
 
         pub fn elem(self: *Self, index: u64) *Element {
-            if (index >= info.len) {
+            if (index >= Type.len) {
                 @panic("index out of bounds");
             }
 
             if (self.elems[index] == null) {
-                if (comptime typeTakesAllocator(info.child.*)) {
-                    if (comptime newTypeAllocates(info.child.*)) {
+                if (comptime typeTakesAllocator(Type.child)) {
+                    if (comptime newTypeAllocates(Type.child)) {
                         self.elems[index] = Element.init(self.allocator);
                     } else {
                         self.elems[index] = Element.init(undefined);
@@ -227,11 +155,11 @@ pub fn WriteNewArray(comptime info: def.Type.Array) type {
     };
 }
 
-pub fn WriteNewList(comptime info: def.Type.List) type {
+fn WriteNewList(comptime Type: type) type {
     return struct {
         elems: std.ArrayList(Element),
 
-        pub const Element = WriteNewType(info.child.*);
+        pub const Element = WriteNewType(Type.child);
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -239,8 +167,8 @@ pub fn WriteNewList(comptime info: def.Type.List) type {
         }
 
         pub fn append(self: *Self) !*Element {
-            if (comptime typeTakesAllocator(info.child.*)) {
-                if (comptime newTypeAllocates(info.child.*)) {
+            if (comptime typeTakesAllocator(Type.child)) {
+                if (comptime newTypeAllocates(Type.child)) {
                     try self.elems.append(Element.init(self.list.allocator));
                 } else {
                     try self.elems.append(Element.init(undefined));
@@ -265,231 +193,147 @@ pub fn WriteNewList(comptime info: def.Type.List) type {
     };
 }
 
-pub fn WriteNewMap(comptime info: def.Type.Map) type {
+fn WriteNewMap(comptime Type: type) type {
     return struct {
-        entries: std.ArrayList(Entry),
+        elems: std.ArrayList(Entry),
 
-        pub const Entry = WriteNewMapEntry(info);
+        pub const Entry = WriteNewMapEntry(Type);
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator) Self {
-            return Self{ .entries = std.ArrayList(Entry).init(allocator) };
+            return Self{ .elems = std.ArrayList(Entry).init(allocator) };
         }
 
         pub fn put(self: *Self) !*Entry {
-            if (comptime newTypeAllocates(info.key.*) or newTypeAllocates(info.value.*)) {
-                try self.entries.append(Entry.init(self.entries.allocator));
+            if (comptime newTypeAllocates(Type.key) or newTypeAllocates(Type.value)) {
+                try self.elems.append(Entry.init(self.elems.allocator));
             } else {
-                try self.entries.append(Entry.init(undefined));
+                try self.elems.append(Entry.init(undefined));
             }
-            return &self.entries.items[self.len() - 1];
+            return &self.elems.items[self.len() - 1];
         }
 
         pub fn entry(self: *Self, index: u64) *Entry {
-            if (index >= self.entries.items.len) {
+            if (index >= self.elems.items.len) {
                 @panic("index out of bounds");
             }
 
-            return &self.entries.items[index];
+            return &self.elems.items[index];
         }
 
         pub fn len(self: *Self) u64 {
-            return self.entries.items.len;
+            return self.elems.items.len;
         }
     };
 }
 
-pub fn WriteNewMapEntry(comptime info: def.Type.Map) type {
+fn WriteNewMapEntry(comptime Type: type) type {
     return struct {
         allocator: Allocator,
-        key: ?Key,
-        value: ?Value,
+        key: Key,
+        value: Value,
 
-        pub const Key = WriteNewType(info.key.*);
-        pub const Value = WriteNewType(info.value.*);
-        const Allocator = if (newTypeAllocates(info.key.*) or newTypeAllocates(info.value.*)) std.mem.Allocator else void;
+        pub const Key = WriteNewType(Type.key);
+        pub const Value = WriteNewType(Type.value);
+        const Allocator = if (newTypeAllocates(Type.key) or newTypeAllocates(Type.value)) std.mem.Allocator else void;
         const Self = @This();
 
         pub fn init(allocator: Allocator) Self {
-            return Self{
+            var self = Self{
                 .allocator = allocator,
-                .key = null,
-                .value = null,
+                .key = undefined,
+                .value = undefined,
             };
-        }
-
-        pub fn key(self: *Self) *Key {
-            if (self.key == null) {
-                if (comptime typeTakesAllocator(info.key.*)) {
-                    if (comptime newTypeAllocates(info.key.*)) {
-                        self.key = Key.init(self.allocator);
-                    } else {
-                        self.key = Key.init(undefined);
-                    }
+            if (comptime typeTakesAllocator(Type.key)) {
+                if (comptime newTypeAllocates(Type.key)) {
+                    self.key = Key.init(self.allocator);
                 } else {
-                    self.key = Key.init();
-                }
-            }
-            return &self.key.?;
-        }
-
-        pub fn value(self: *Self) *Value {
-            if (self.value == null) {
-                if (comptime typeTakesAllocator(info.value.*)) {
-                    if (comptime newTypeAllocates(info.value.*)) {
-                        self.value = Value.init(self.allocator);
-                    } else {
-                        self.value = Value.init(undefined);
-                    }
-                } else {
-                    self.value = Value.init();
-                }
-            }
-            return &self.value.?;
-        }
-    };
-}
-
-pub fn WriteNewStruct(comptime info: def.Type.Struct) type {
-    return WriteStruct(info, WriteNewType, newTypeAllocates);
-}
-
-pub fn WriteNewTuple(comptime info: def.Type.Tuple) type {
-    return WriteTuple(info, WriteNewType, newTypeAllocates);
-}
-
-pub fn WriteNewUnion(comptime info: def.Type.Union) type {
-    return WriteUnion(info, WriteNewType, newTypeAllocates);
-}
-
-pub fn WriteMutateObject(comptime object: def.ObjectScheme.Object) type {
-    return struct {
-        allocator: Allocator,
-        version: ?Version,
-
-        pub const Version = blk: {
-            var tag_fields: [object.versions.len]std.builtin.Type.EnumField = undefined;
-            var union_fields: [tag_fields.len]std.builtin.Type.UnionField = undefined;
-            for (object.versions, 0..) |ver, i| {
-                tag_fields[i] = .{
-                    .name = "V" ++ meta.numFieldName(i),
-                    .value = i,
-                };
-
-                const Type = WriteMutateType(ver);
-                union_fields[i] = .{
-                    .name = tag_fields[i].name,
-                    .type = Type,
-                    .alignment = @alignOf(Type),
-                };
-            }
-            break :blk @Type(.{
-                .Union = .{
-                    .layout = .Auto,
-                    .tag_type = @Type(.{
-                        .Enum = .{
-                            .tag_type = std.math.IntFittingRange(0, tag_fields - 1),
-                            .fields = &tag_fields,
-                            .decls = &[_]std.builtin.Type.Declaration{},
-                            .is_exhaustive = true,
-                        },
-                    }),
-                    .fields = &union_fields,
-                    .decls = &[_]std.builtin.Type.Declaration{},
-                },
-            });
-        };
-        const Allocator = if (mutateObjectAllocates(object)) std.mem.Allocator else void;
-        const Self = @This();
-
-        pub fn init(allocator: Allocator) Self {
-            return Self{
-                .allocator = allocator,
-                .version = null,
-            };
-        }
-
-        pub fn version(self: *Self, comptime num: comptime_int) *WriteMutateType(object.versions[num]) {
-            const field_name = "V" ++ meta.numFieldName(num);
-            const field_type = object.versions[num];
-            if (self.version) |ver| {
-                switch (ver) {
-                    inline else => |val, tag| {
-                        if (@intFromEnum(tag) == num) {
-                            return &@field(self.version, field_name);
-                        }
-                        if (comptime mutateTypeAllocates(field_type)) {
-                            deinitMutateType(self.allocator, field_type, val);
-                        }
-                    },
-                }
-            }
-
-            const FieldType = WriteMutateType(field_type);
-            if (comptime typeTakesAllocator(field_type)) {
-                if (comptime mutateTypeAllocates(field_type)) {
-                    self.version = @unionInit(Version, field_name, FieldType.init(self.allocator));
-                } else {
-                    self.version = @unionInit(Version, field_name, FieldType.init(undefined));
+                    self.key = Key.init(undefined);
                 }
             } else {
-                self.version = @unionInit(Version, field_name, FieldType.init());
+                self.key = Key.init();
             }
-
-            return &@field(self.version, field_name);
+            if (comptime typeTakesAllocator(Type.value)) {
+                if (comptime newTypeAllocates(Type.value)) {
+                    self.value = Value.init(self.allocator);
+                } else {
+                    self.value = Value.init(undefined);
+                }
+            } else {
+                self.value = Value.init();
+            }
+            return self;
         }
     };
 }
 
-pub fn WriteMutateType(comptime typ: def.Type) type {
-    return switch (typ) {
-        .Void => WriteVoid,
-        .Bool => WriteBool,
+fn WriteNewStruct(comptime Type: type) type {
+    return WriteStruct(Type, WriteNewType, newTypeAllocates);
+}
+
+fn WriteNewTuple(comptime Type: type) type {
+    return WriteTuple(Type, WriteNewType, newTypeAllocates);
+}
+
+fn WriteNewUnion(comptime Type: type) type {
+    return WriteUnion(Type, WriteNewType, newTypeAllocates);
+}
+
+fn WriteMutateObject(comptime Object: type) type {
+    return WriteObject(Object, WriteMutateType, mutateTypeAllocates, deinitMutateType);
+}
+
+fn WriteMutateType(comptime Type: type) type {
+    return switch (def.Type.from(Type).?) {
+        .Void => WriteValue(void),
+        .Bool => WriteValue(bool),
+        .Int => WriteValue(Type),
+        .Float => WriteValue(Type),
         .String => WriteMutateString,
-        .Int => |info| WriteInt(info),
-        .Float => |info| WriteFloat(info),
-        .Optional => |info| WriteMutateOptional(info),
-        .Array => |info| WriteMutateArray(info),
-        .List => |info| WriteMutateList(info),
-        .Map => |info| WriteMutateMap(info),
-        .Struct => |info| WriteMutateStruct(info),
-        .Tuple => |info| WriteMutateTuple(info),
-        .Union => |info| WriteMutateUnion(info),
-        .Enum => |info| WriteEnum(info),
-        .Ref => WriteRef,
+        .Optional => WriteMutateOptional(Type),
+        .Array => WriteMutateArray(Type),
+        .List => WriteMutateList(Type),
+        .Map => WriteMutateMap(Type),
+        .Struct => WriteMutateStruct(Type),
+        .Tuple => WriteMutateTuple(Type),
+        .Union => WriteMutateUnion(Type),
+        .Enum => WriteValue(Type),
+        .Ref => WriteValue(def.ObjectId),
     };
 }
 
-pub const WriteMutateString = struct {
-    ops: std.ArrayList(serde.MutateString),
+const WriteMutateString = struct {
+    elems: std.ArrayList(Op),
+
+    const Op = serde.MutateStringOp;
 
     pub fn init(allocator: std.mem.Allocator) WriteMutateString {
-        return WriteMutateString{ .ops = std.ArrayList(serde.MutateString).init(allocator) };
+        return WriteMutateString{ .elems = std.ArrayList(serde.MutateString).init(allocator) };
     }
 
     pub fn append(self: *WriteMutateString, str: []const u8) !void {
-        try self.ops.append(serde.MutateString{
-            .Append = try self.ops.allocator.dupe(u8, str),
+        try self.elems.append(Op{
+            .Append = try self.elems.allocator.dupe(u8, str),
         });
     }
 
     pub fn prepend(self: *WriteMutateString, str: []const u8) !void {
-        try self.ops.append(serde.MutateString{
-            .Prepend = try self.ops.allocator.dupe(u8, str),
+        try self.elems.append(Op{
+            .Prepend = try self.elems.allocator.dupe(u8, str),
         });
     }
 
     pub fn insert(self: *WriteMutateString, index: u64, str: []const u8) !void {
-        try self.ops.append(serde.MutateString{
+        try self.elems.append(Op{
             .Insert = .{
                 .index = index,
-                .str = try self.ops.allocator.dupe(u8, str),
+                .str = try self.elems.allocator.dupe(u8, str),
             },
         });
     }
 
     pub fn delete(self: *WriteMutateString, index: u64, len: u64) !void {
-        try self.ops.append(serde.MutateString{
+        try self.elems.append(Op{
             .Delete = .{
                 .index = index,
                 .len = len,
@@ -498,37 +342,37 @@ pub const WriteMutateString = struct {
     }
 };
 
-pub fn WriteMutateOptional(comptime info: def.Type.Optional) type {
-    return WriteOptional(info, WriteMutateType, mutateTypeAllocates);
+fn WriteMutateOptional(comptime Type: type) type {
+    return WriteOptional(Type, WriteMutateType, mutateTypeAllocates);
 }
 
-pub fn WriteMutateArray(comptime info: def.Type.Array) type {
+fn WriteMutateArray(comptime Type: type) type {
     return struct {
-        ops: std.AutoHashMap(u64, Op),
+        elems: std.ArrayList(Op),
 
         pub const Op = struct {
             index: u64,
             elem: Element,
         };
-        pub const Element = WriteMutateType(info.child.*);
+        pub const Element = WriteMutateType(Type.child);
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator) Self {
-            return Self{ .ops = std.ArrayList(Op).init(allocator) };
+            return Self{ .elems = std.ArrayList(Op).init(allocator) };
         }
 
         pub fn elem(self: *Self, index: u64) *Element {
-            if (index >= info.len) {
+            if (index >= Type.len) {
                 @panic("index out of bounds");
             }
 
-            const gop = try self.ops.getOrPut(index);
+            const gop = try self.elems.getOrPut(index);
             if (!gop.found_existing) {
-                if (comptime typeTakesAllocator(info.child.*)) {
-                    if (comptime mutateTypeAllocates(info.child.*)) {
+                if (comptime typeTakesAllocator(Type.child)) {
+                    if (comptime mutateTypeAllocates(Type.child)) {
                         gop.value_ptr.* = Op{
                             .index = index,
-                            .elem = Element.init(self.ops.allocator),
+                            .elem = Element.init(self.elems.allocator),
                         };
                     } else {
                         gop.value_ptr.* = Op{
@@ -549,25 +393,27 @@ pub fn WriteMutateArray(comptime info: def.Type.Array) type {
     };
 }
 
-pub fn WriteMutateList(comptime info: def.Type.List) type {
+fn WriteMutateList(comptime Type: type) type {
     return struct {
-        ops: std.ArrayList(Op),
+        elems: std.ArrayList(Op),
 
         pub const Op = union(enum) {
             Append: NewElement,
             Prepend: NewElement,
-            Insert: struct {
-                index: u64,
-                elem: NewElement,
-            },
+            Insert: InsertOp,
             Delete: u64,
-            Mutate: struct {
-                index: u64,
-                elem: MutateElement,
-            },
+            Mutate: MutateOp,
         };
-        pub const NewElement = WriteNewType(info.child.*);
-        pub const MutateElement = WriteMutateType(info.child.*);
+        pub const InsertOp = struct {
+            index: u64,
+            elem: NewElement,
+        };
+        pub const MutateOp = struct {
+            index: u64,
+            elem: MutateElement,
+        };
+        pub const NewElement = WriteNewType(Type.child);
+        pub const MutateElement = WriteMutateType(Type.child);
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -575,202 +421,193 @@ pub fn WriteMutateList(comptime info: def.Type.List) type {
         }
 
         pub fn append(self: *Self) !*NewElement {
-            const index = self.ops.items.len;
-            if (comptime typeTakesAllocator(info.child.*)) {
-                if (comptime newTypeAllocates(info.child.*)) {
-                    try self.ops.append(Op{ .Append = NewElement.init(self.ops.allocator) });
+            const index = self.elems.items.len;
+            if (comptime typeTakesAllocator(Type.child)) {
+                if (comptime newTypeAllocates(Type.child)) {
+                    try self.elems.append(Op{ .Append = NewElement.init(self.elems.allocator) });
                 } else {
-                    try self.ops.append(Op{ .Append = NewElement.init(undefined) });
+                    try self.elems.append(Op{ .Append = NewElement.init(undefined) });
                 }
             } else {
-                try self.ops.append(Op{ .Append = NewElement.init() });
+                try self.elems.append(Op{ .Append = NewElement.init() });
             }
-            return &self.ops.items[index].Append;
+            return &self.elems.items[index].Append;
         }
 
         pub fn prepend(self: *Self) !*NewElement {
-            const index = self.ops.items.len;
-            if (comptime typeTakesAllocator(info.child.*)) {
-                if (comptime newTypeAllocates(info.child.*)) {
-                    try self.ops.append(Op{ .Prepend = NewElement.init(self.ops.allocator) });
+            const index = self.elems.items.len;
+            if (comptime typeTakesAllocator(Type.child)) {
+                if (comptime newTypeAllocates(Type.child)) {
+                    try self.elems.append(Op{ .Prepend = NewElement.init(self.elems.allocator) });
                 } else {
-                    try self.ops.append(Op{ .Prepend = NewElement.init(undefined) });
+                    try self.elems.append(Op{ .Prepend = NewElement.init(undefined) });
                 }
             } else {
-                try self.ops.append(Op{ .Prepend = NewElement.init() });
+                try self.elems.append(Op{ .Prepend = NewElement.init() });
             }
-            return &self.ops.items[index].Prepend;
+            return &self.elems.items[index].Prepend;
         }
 
         pub fn insert(self: *Self, index: u64) !*NewElement {
-            const op_index = self.ops.items.len;
-            if (comptime typeTakesAllocator(info.child.*)) {
-                if (comptime newTypeAllocates(info.child.*)) {
-                    try self.ops.append(Op{ .Insert = .{
+            const op_index = self.elems.items.len;
+            if (comptime typeTakesAllocator(Type.child)) {
+                if (comptime newTypeAllocates(Type.child)) {
+                    try self.elems.append(Op{ .Insert = .{
                         .index = index,
-                        .elem = NewElement.init(self.ops.allocator),
+                        .elem = NewElement.init(self.elems.allocator),
                     } });
                 } else {
-                    try self.ops.append(Op{ .Insert = .{
+                    try self.elems.append(Op{ .Insert = .{
                         .index = index,
                         .elem = NewElement.init(undefined),
                     } });
                 }
             } else {
-                try self.ops.append(Op{ .Insert = .{
+                try self.elems.append(Op{ .Insert = .{
                     .index = index,
                     .elem = NewElement.init(),
                 } });
             }
-            return &self.ops.items[op_index].Insert.elem;
+            return &self.elems.items[op_index].Insert.elem;
         }
 
         pub fn delete(self: *Self, index: u64) !void {
-            try self.ops.append(Op{ .Delete = index });
+            try self.elems.append(Op{ .Delete = index });
         }
 
         pub fn mutate(self: *Self, index: u64) !*MutateElement {
-            const op_index = self.ops.items.len;
-            if (comptime typeTakesAllocator(info.child.*)) {
-                if (comptime newTypeAllocates(info.child.*)) {
-                    try self.ops.append(Op{ .Mutate = .{
+            const op_index = self.elems.items.len;
+            if (comptime typeTakesAllocator(Type.child)) {
+                if (comptime newTypeAllocates(Type.child)) {
+                    try self.elems.append(Op{ .Mutate = .{
                         .index = index,
-                        .elem = MutateElement.init(self.ops.allocator),
+                        .elem = MutateElement.init(self.elems.allocator),
                     } });
                 } else {
-                    try self.ops.append(Op{ .Mutate = .{
+                    try self.elems.append(Op{ .Mutate = .{
                         .index = index,
                         .elem = MutateElement.init(undefined),
                     } });
                 }
             } else {
-                try self.ops.append(Op{ .Mutate = .{
+                try self.elems.append(Op{ .Mutate = .{
                     .index = index,
                     .elem = MutateElement.init(),
                 } });
             }
-            return &self.ops.items[op_index].Mutate.elem;
+            return &self.elems.items[op_index].Mutate.elem;
         }
     };
 }
 
-pub fn WriteMutateMap(comptime info: def.Type.Map) type {
+fn WriteMutateMap(comptime Type: type) type {
     return struct {
-        ops: std.ArrayList(Op),
+        elems: std.ArrayList(Op),
 
         pub const Op = union(enum) {
             Put: NewEntry,
             Remove: NewKey,
             Mutate: MutateEntry,
         };
-        pub const NewEntry = WriteNewMapEntry(info);
-        pub const NewKey = WriteNewType(info.key.*);
-        pub const MutateEntry = WriteMutateMapEntry(info);
+        pub const NewEntry = WriteNewMapEntry(Type);
+        pub const NewKey = WriteNewType(Type.key);
+        pub const MutateEntry = WriteMutateMapEntry(Type);
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator) Self {
-            return Self{ .ops = std.ArrayList(Op).init(allocator) };
+            return Self{ .elems = std.ArrayList(Op).init(allocator) };
         }
 
         pub fn put(self: *Self) !*NewEntry {
-            const index = self.ops.items.len;
-            if (comptime newTypeAllocates(info.key.*) or newTypeAllocates(info.value.*)) {
-                try self.ops.append(Op{ .Put = NewEntry.init(self.ops.allocator) });
+            const index = self.elems.items.len;
+            if (comptime newTypeAllocates(Type.key) or newTypeAllocates(Type.value)) {
+                try self.elems.append(Op{ .Put = NewEntry.init(self.elems.allocator) });
             } else {
-                try self.ops.append(Op{ .Put = NewEntry.init(undefined) });
+                try self.elems.append(Op{ .Put = NewEntry.init(undefined) });
             }
-            return &self.ops.items[index].Put;
+            return &self.elems.items[index].Put;
         }
 
         pub fn remove(self: *Self) !*NewKey {
-            const index = self.ops.items.len;
-            if (comptime newTypeAllocates(info.key.*)) {
-                try self.ops.append(Op{ .Remove = NewKey.init(self.ops.allocator) });
+            const index = self.elems.items.len;
+            if (comptime newTypeAllocates(Type.key)) {
+                try self.elems.append(Op{ .Remove = NewKey.init(self.elems.allocator) });
             } else {
-                try self.ops.append(Op{ .Remove = NewKey.init(undefined) });
+                try self.elems.append(Op{ .Remove = NewKey.init(undefined) });
             }
-            return &self.ops.items[index].Remove;
+            return &self.elems.items[index].Remove;
         }
 
         pub fn mutate(self: *Self) !*MutateEntry {
-            const index = self.ops.items.len;
-            if (comptime newTypeAllocates(info.key.*)) {
-                try self.ops.append(Op{ .Mutate = MutateEntry.init(self.ops.allocator) });
+            const index = self.elems.items.len;
+            if (comptime newTypeAllocates(Type.key)) {
+                try self.elems.append(Op{ .Mutate = MutateEntry.init(self.elems.allocator) });
             } else {
-                try self.ops.append(Op{ .Mutate = MutateEntry.init(undefined) });
+                try self.elems.append(Op{ .Mutate = MutateEntry.init(undefined) });
             }
-            return &self.ops.items[index].Mutate;
+            return &self.elems.items[index].Mutate;
         }
     };
 }
 
-pub fn WriteMutateMapEntry(comptime info: def.Type.Map) type {
+fn WriteMutateMapEntry(comptime Type: type) type {
     return struct {
         allocator: Allocator,
-        key: ?Key,
-        value: ?Value,
+        key: Key,
+        value: Value,
 
-        pub const Key = WriteNewType(info.key.*);
-        pub const Value = WriteMutateType(info.value.*);
-        const Allocator = if (newTypeAllocates(info.key.*) or mutateTypeAllocates(info.vlaue.*))
+        pub const Key = WriteNewType(Type.key);
+        pub const Value = WriteMutateType(Type.value);
+        const Allocator = if (newTypeAllocates(Type.key) or mutateTypeAllocates(Type.value))
             std.mem.Allocator
         else
             void;
         const Self = @This();
 
         pub fn init(allocator: Allocator) Self {
-            return Self{
+            var self = Self{
                 .allocator = allocator,
-                .key = null,
-                .value = null,
+                .key = undefined,
+                .value = undefined,
             };
-        }
-
-        pub fn key(self: *Self) *Key {
-            if (self.key == null) {
-                if (comptime typeTakesAllocator(info.key.*)) {
-                    if (comptime newTypeAllocates(info.key.*)) {
-                        self.key = Key.init(self.allocator);
-                    } else {
-                        self.key = Key.init(undefined);
-                    }
+            if (comptime typeTakesAllocator(Type.key)) {
+                if (comptime newTypeAllocates(Type.key)) {
+                    self.key = Key.init(self.allocator);
                 } else {
-                    self.key = Key.init();
+                    self.key = Key.init(undefined);
                 }
+            } else {
+                self.key = Key.init();
             }
-            return &self.key.?;
-        }
 
-        pub fn value(self: *Self) *Value {
-            if (self.value == null) {
-                if (comptime typeTakesAllocator(info.value.*)) {
-                    if (comptime mutateTypeAllocates(info.value.*)) {
-                        self.value = Value.init(self.allocator);
-                    } else {
-                        self.value = Value.init(undefined);
-                    }
+            if (comptime typeTakesAllocator(Type.value)) {
+                if (comptime mutateTypeAllocates(Type.value)) {
+                    self.value = Value.init(self.allocator);
                 } else {
-                    self.value = Value.init();
+                    self.value = Value.init(undefined);
                 }
+            } else {
+                self.value = Value.init();
             }
-            return &self.value.?;
+
+            return self;
         }
     };
 }
 
-pub fn WriteMutateStruct(comptime info: def.Type.Struct) type {
-    return WriteStruct(info, WriteMutateType, mutateTypeAllocates);
+fn WriteMutateStruct(comptime Type: type) type {
+    return WriteStruct(Type, WriteMutateType, mutateTypeAllocates);
 }
 
-pub fn WriteMutateTuple(comptime info: def.Type.Tuple) type {
-    return WriteTuple(info, WriteMutateType, mutateTypeAllocates);
+fn WriteMutateTuple(comptime Type: type) type {
+    return WriteTuple(Type, WriteMutateType, mutateTypeAllocates);
 }
 
-pub fn WriteMutateUnion(comptime info: def.Type.Union) type {
-    return WriteUnion(info, WriteMutateUnionField, newOrMutateTypeAllocates);
+fn WriteMutateUnion(comptime Type: type) type {
+    return WriteUnion(Type, WriteMutateUnionField, newOrMutateTypeAllocates);
 }
 
-pub fn WriteMutateUnionField(comptime typ: def.Type) type {
+fn WriteMutateUnionField(comptime Type: type) type {
     return struct {
         allocator: Allocator,
         active: ?Active,
@@ -779,9 +616,9 @@ pub fn WriteMutateUnionField(comptime typ: def.Type) type {
             New: New,
             Mutate: Mutate,
         };
-        pub const New = WriteNewType(typ);
-        pub const Mutate = WriteMutateType(typ);
-        const Allocator = if (newOrMutateTypeAllocates(typ)) std.mem.Allocator else void;
+        pub const New = WriteNewType(Type);
+        pub const Mutate = WriteMutateType(Type);
+        const Allocator = if (newOrMutateTypeAllocates(Type)) std.mem.Allocator else void;
         const Self = @This();
 
         pub fn init(allocator: Allocator) Self {
@@ -801,8 +638,8 @@ pub fn WriteMutateUnionField(comptime typ: def.Type) type {
                 }
             }
 
-            if (comptime typeTakesAllocator(typ)) {
-                if (comptime newTypeAllocates(typ)) {
+            if (comptime typeTakesAllocator(Type)) {
+                if (comptime newTypeAllocates(Type)) {
                     self.active = Active{ .New = New.init(self.allocator) };
                 } else {
                     self.active = Active{ .New = New.init(undefined) };
@@ -824,8 +661,8 @@ pub fn WriteMutateUnionField(comptime typ: def.Type) type {
                 }
             }
 
-            if (comptime typeTakesAllocator(typ)) {
-                if (comptime mutateTypeAllocates(typ)) {
+            if (comptime typeTakesAllocator(Type)) {
+                if (comptime mutateTypeAllocates(Type)) {
                     self.active = Active{ .Mutate = New.init(self.allocator) };
                 } else {
                     self.active = Active{ .Mutate = New.init(undefined) };
@@ -839,85 +676,121 @@ pub fn WriteMutateUnionField(comptime typ: def.Type) type {
     };
 }
 
-pub const WriteVoid = struct {
-    pub fn init() WriteVoid {
-        return WriteVoid{};
-    }
-};
-
-pub const WriteBool = struct {
-    value: ?bool,
-
-    pub fn init() WriteBool {
-        return WriteBool{ .value = null };
-    }
-
-    pub fn set(self: *WriteBool, value: bool) void {
-        self.value = value;
-    }
-};
-
-pub fn WriteInt(comptime info: def.Type.Int) type {
+fn WriteObject(
+    comptime Object: type,
+    comptime WriteType: fn (type) type,
+    comptime typeAllocates: fn (type) bool,
+    comptime deinitVersion: anytype,
+) type {
     return struct {
-        value: ?Int,
+        allocator: Allocator,
+        active: ?Version,
 
-        pub const Int = @Type(.{
-            .Int = .{
-                .signedness = switch (info.signedness) {
-                    .signed => .signed,
-                    .unsigned => .unsigned,
+        pub const Version = blk: {
+            var tag_fields: [Object.versions.len]std.builtin.Type.EnumField = undefined;
+            var fields: [tag_fields.len]std.builtin.Type.UnionField = undefined;
+            for (Object.versions, 0..) |Ver, i| {
+                tag_fields[i] = .{
+                    .name = "V" ++ meta.numFieldName(i),
+                    .value = i,
+                };
+
+                const FieldType = WriteType(Ver);
+                fields[i] = .{
+                    .name = tag_fields[i].name,
+                    .type = FieldType,
+                    .alignment = @alignOf(FieldType),
+                };
+            }
+            break :blk @Type(.{
+                .Union = .{
+                    .layout = .Auto,
+                    .tag_type = @Type(.{
+                        .Enum = .{
+                            .tag_type = std.math.IntFittingRange(0, tag_fields.len - 1),
+                            .fields = &tag_fields,
+                            .decls = &[_]std.builtin.Type.Declaration{},
+                            .is_exhaustive = true,
+                        },
+                    }),
+                    .fields = &fields,
+                    .decls = &[_]std.builtin.Type.Declaration{},
                 },
-                .bits = info.bits,
-            },
-        });
+            });
+        };
+        const Allocator = if (objectAllocates(Object, typeAllocates)) std.mem.Allocator else void;
         const Self = @This();
 
-        pub fn init() Self {
-            return Self{ .value = null };
+        pub fn init(allocator: Allocator) Self {
+            return Self{
+                .allocator = allocator,
+                .active = null,
+            };
         }
 
-        pub fn set(self: *Self, value: Int) void {
-            self.value = value;
+        pub fn version(self: *Self, comptime num: comptime_int) *WriteType(Object.versions[num]) {
+            const field_name = "V" ++ comptime meta.numFieldName(num);
+            const field_type = Object.versions[num];
+            if (self.active) |*active| {
+                const val = &@field(active, field_name);
+                if (@intFromEnum(active.*) == num) {
+                    return val;
+                }
+                if (comptime typeAllocates(field_type)) {
+                    deinitVersion(self.allocator, field_type, val);
+                }
+            }
+
+            const FieldType = WriteType(field_type);
+            if (comptime typeTakesAllocator(field_type)) {
+                if (comptime typeAllocates(field_type)) {
+                    self.active = @unionInit(Version, field_name, FieldType.init(self.allocator));
+                } else {
+                    self.active = @unionInit(Version, field_name, FieldType.init(undefined));
+                }
+            } else {
+                self.active = @unionInit(Version, field_name, FieldType.init());
+            }
+
+            return &@field(self.active.?, field_name);
         }
     };
 }
 
-pub fn WriteFloat(comptime info: def.Type.Float) type {
+fn WriteValue(comptime Type: type) type {
     return struct {
-        value: ?Float,
+        value: ?Type,
 
-        pub const Float = @Type(.{
-            .Float = .{
-                .bits = info.bits,
-            },
-        });
+        const Value = Type;
         const Self = @This();
 
         pub fn init() Self {
             return Self{ .value = null };
         }
 
-        pub fn set(self: *Self, value: Float) void {
+        pub fn set(self: *Self, value: Type) void {
             self.value = value;
         }
     };
 }
 
 fn WriteOptional(
-    comptime info: def.Type.Optional,
-    comptime WriteType: fn (def.Type) type,
-    comptime typeAllocates: fn (def.Type) bool,
+    comptime Type: type,
+    comptime WriteType: fn (type) type,
+    comptime typeAllocates: fn (type) bool,
+    comptime deinitChild: anytype,
 ) type {
     return struct {
         allocator: Allocator,
-        opt: Option,
+        opt: ?Option,
 
         pub const Option = union(enum) {
-            Some: ?WriteNewType(info.child.*),
+            Some: WriteNewType(Child),
             None,
         };
-        pub const FieldType = WriteType(info.chid.*);
-        const Allocator = if (typeAllocates(info.child.*)) std.mem.Allocator else void;
+        pub const FieldType = WriteType(Child);
+        const Allocator = if (typeAllocates(Child)) std.mem.Allocator else void;
+        const Child = std.meta.Child(Type);
         const Self = @This();
 
         pub fn init(allocator: Allocator) Self {
@@ -928,52 +801,55 @@ fn WriteOptional(
         }
 
         pub fn some(self: *Self) *FieldType {
-            if (self.opt == .None or self.opt.Some == null) {
-                if (comptime typeTakesAllocator(info.child.*)) {
-                    self.opt = Option{
-                        .Some = if (comptime typeAllocates(info.child.*))
-                            FieldType.init(self.allocator)
-                        else
-                            FieldType.init(undefined),
-                    };
+            if (self.opt == null or self.opt.? == .None) {
+                if (comptime typeTakesAllocator(Child)) {
+                    if (comptime typeAllocates(Child)) {
+                        self.opt = Option{ .Some = FieldType.init(self.allocator) };
+                    } else {
+                        self.opt = Option{ .Some = FieldType.init(undefined) };
+                    }
                 } else {
-                    self.opt = Option{
-                        .Some = FieldType.init(),
-                    };
+                    self.opt = Option{ .Some = FieldType.init() };
                 }
             }
             return &self.opt.Some.?;
         }
 
         pub fn none(self: *Self) void {
-            if (self.opt == .None) {
-                self.opt = Option{
-                    .Some = null,
-                };
+            if (self.opt) |*opt| {
+                switch (opt) {
+                    .Some => |*val| {
+                        if (comptime typeAllocates(Child)) {
+                            deinitChild(self.allocator, Child, val);
+                        }
+                    },
+                    .None => {},
+                }
             }
         }
     };
 }
 
 fn WriteStruct(
-    comptime info: def.Type.Struct,
-    comptime WriteType: fn (def.Type) type,
-    comptime typeAllocates: fn (def.Type) bool,
+    comptime Type: type,
+    comptime WriteType: fn (type) type,
+    comptime typeAllocates: fn (type) bool,
 ) type {
     return struct {
         allocator: Allocator,
         fields: Fields,
 
         pub const Fields = blk: {
+            const info = @typeInfo(Type).Struct;
             var fields: [info.fields.len]std.builtin.Type.Struct = undefined;
             for (info.fields, 0..) |f, i| {
-                const Type = ?WriteType(f.type);
+                const FT = ?WriteType(f.type);
                 fields[i] = .{
                     .name = f.name,
-                    .type = Type,
+                    .type = FT,
                     .default_value = null,
                     .is_comptime = false,
-                    .alignment = @alignOf(Type),
+                    .alignment = @alignOf(FT),
                 };
             }
             break :blk @Type(.{
@@ -992,14 +868,14 @@ fn WriteStruct(
             return std.meta.Child(OptType);
         }
 
-        const Allocator = for (info.fields) |f| {
+        const Allocator = for (std.meta.fields(Type)) |f| {
             if (newTypeAllocates(f.type)) break std.mem.Allocator;
         } else void;
         const Self = @This();
 
         pub fn init(allocator: Allocator) Self {
             var fields: Fields = undefined;
-            inline for (info.fields) |f| {
+            inline for (std.meta.fields(Type)) |f| {
                 @field(fields, f.name) = null;
             }
             return Self{
@@ -1009,7 +885,7 @@ fn WriteStruct(
         }
 
         pub fn field(self: *Self, comptime name: std.meta.FieldEnum(Fields)) *FieldType(name) {
-            const field_type = info.fields[@intFromEnum(name)].type;
+            const field_type = std.meta.fields(Type)[@intFromEnum(name)].type;
             const field_name = @tagName(name);
             if (@field(self.fields, field_name) == null) {
                 if (comptime typeTakesAllocator(field_type)) {
@@ -1028,24 +904,25 @@ fn WriteStruct(
 }
 
 fn WriteTuple(
-    comptime info: def.Type.Tuple,
-    comptime WriteType: fn (def.Type) type,
-    comptime typeAllocates: fn (def.Type) bool,
+    comptime Type: type,
+    comptime WriteType: fn (type) type,
+    comptime typeAllocates: fn (type) bool,
 ) type {
     return struct {
         allocator: Allocator,
         fields: Fields,
 
         pub const Fields = blk: {
+            const info = @typeInfo(Type).Struct;
             var fields: [info.fields.len]std.builtin.Type.Struct = undefined;
             for (info.fields, 0..) |f, i| {
-                const Type = ?WriteType(f);
+                const FT = ?WriteType(f.type);
                 fields[i] = .{
                     .name = meta.numFieldName(i),
-                    .type = Type,
+                    .type = FT,
                     .default_value = null,
                     .is_comptime = false,
-                    .alignment = @alignOf(Type),
+                    .alignment = @alignOf(FT),
                 };
             }
             break :blk @Type(.{
@@ -1064,14 +941,14 @@ fn WriteTuple(
             return std.meta.Child(OptType);
         }
 
-        const Allocator = for (info.fields) |f| {
+        const Allocator = for (std.meta.fields(Type)) |f| {
             if (newTypeAllocates(f)) break std.mem.Allocator;
         } else void;
         const Self = @This();
 
         pub fn init(allocator: Allocator) Self {
             var fields: Fields = undefined;
-            inline for (0..info.fields.len) |i| {
+            inline for (0..std.meta.fields(Type).len) |i| {
                 fields[i] = null;
             }
             return Self{
@@ -1081,7 +958,7 @@ fn WriteTuple(
         }
 
         pub fn field(self: *Self, comptime index: comptime_int) *FieldType(index) {
-            const field_type = info.fields[index];
+            const field_type = std.meta.fields(Type)[index].type;
             if (self.fields[index] == null) {
                 if (comptime typeTakesAllocator(field_type)) {
                     if (comptime typeAllocates(field_type)) {
@@ -1099,15 +976,16 @@ fn WriteTuple(
 }
 
 fn WriteUnion(
-    comptime info: def.Type.Union,
-    comptime WriteType: fn (def.Type) type,
-    comptime typeAllocates: fn (def.Type) bool,
+    comptime Type: type,
+    comptime WriteType: fn (type) type,
+    comptime typeAllocates: fn (type) bool,
 ) type {
     return struct {
         allocator: Allocator,
         active: ?Fields,
 
         pub const Fields = blk: {
+            const info = @typeInfo(Type).Union;
             var tag_fields: [info.fields.len]std.builtin.Type.EnumField = undefined;
             var fields: [info.fields.len]std.builtin.Type.UnionField = undefined;
             for (info.fields, 0..) |f, i| {
@@ -1116,11 +994,11 @@ fn WriteUnion(
                     .value = i,
                 };
 
-                const Type = WriteType(f.type);
+                const FT = WriteType(f.type);
                 fields[i] = .{
                     .name = f.name,
-                    .type = Type,
-                    .alignment = @alignOf(Type),
+                    .type = FT,
+                    .alignment = @alignOf(FT),
                 };
             }
             break :blk @Type(.{
@@ -1144,7 +1022,7 @@ fn WriteUnion(
             return std.meta.FieldType(Fields, name);
         }
 
-        const Allocator = for (info.fields) |f| {
+        const Allocator = for (std.meta.fields(Type)) |f| {
             if (newTypeAllocates(f.type)) break std.mem.Allocator;
         } else void;
         const Self = @This();
@@ -1158,7 +1036,7 @@ fn WriteUnion(
 
         pub fn field(self: *Self, comptime name: std.meta.FieldEnum(Fields)) *FieldType(name) {
             const field_name = @tagName(name);
-            const field_type = info.fields[@intFromEnum(name)].type;
+            const field_type = std.meta.fields(Type)[@intFromEnum(name)].type;
             if (self.active) |*active| {
                 switch (active) {
                     inline else => |*val, tag| {
@@ -1188,60 +1066,65 @@ fn WriteUnion(
     };
 }
 
-pub fn WriteEnum(comptime info: def.Type.Enum) type {
-    return struct {
-        value: ?Enum,
+fn objectAllocates(comptime Object: type, comptime typeAllocates: fn (type) bool) bool {
+    return for (Object.versions) |Ver| {
+        if (comptime typeAllocates(Ver)) break true;
+    } else false;
+}
 
-        pub const Enum = blk: {
-            var fields: [info.fields.len]std.builtin.Type.Enum = undefined;
-            for (info.fields, 0..) |field, i| {
-                fields[i] = .{
-                    .name = field.name,
-                    .value = i,
-                };
-            }
-            break :blk @Type(.{
-                .Enum = .{
-                    .tag_type = std.math.IntFittingRange(0, info.fields.len),
-                    .fields = &fields,
-                    .decls = &[_]std.builtin.Type.Declaration{},
-                    .is_exhaustive = true,
-                },
-            });
-        };
-        const Self = @This();
+fn newOrMutateTypeAllocates(comptime Type: type) bool {
+    return newTypeAllocates(Type) or mutateTypeAllocates(Type);
+}
 
-        pub fn init() Self {
-            return Self{ .value = null };
-        }
-
-        pub fn set(self: *Self, value: Enum) void {
-            self.value = value;
-        }
+fn newTypeAllocates(comptime Type: type) bool {
+    return switch (def.Type.from(Type).?) {
+        .Void, .Bool, .Int, .Float, .Enum, .Ref => false,
+        .String, .List, .Map => true,
+        .Optional => comptime newTypeAllocates(std.meta.Child(Type)),
+        .Array => comptime newTypeAllocates(std.meta.Child(Type)),
+        .Struct, .Tuple => for (std.meta.fields(Type)) |field| {
+            if (comptime newTypeAllocates(field.type)) break true;
+        } else false,
+        .Union => for (std.meta.fields(Type)) |field| {
+            if (comptime newTypeAllocates(field.type)) break true;
+        } else false,
     };
 }
 
-pub const WriteRef = struct {
-    value: ?def.ObjectId,
+fn mutateTypeAllocates(comptime Type: type) bool {
+    return switch (def.Type.from(Type).?) {
+        .Void, .Bool, .Int, .Float, .Enum, .Ref => false,
+        .String, .Array, .List, .Map => true,
+        .Optional => comptime mutateTypeAllocates(std.meta.Child(Type)),
+        .Struct, .Tuple => for (std.meta.fields(Type)) |field| {
+            if (comptime mutateTypeAllocates(field.type)) break true;
+        } else false,
+        .Union => for (std.meta.fields(Type)) |field| {
+            if (comptime mutateTypeAllocates(field.type)) break true;
+        } else false,
+    };
+}
 
-    pub fn init() WriteRef {
-        return WriteRef{ .value = null };
-    }
+fn typeTakesAllocator(comptime Type: type) bool {
+    return switch (def.Type.from(Type).?) {
+        .Void, .Bool, .Int, .Float, .Enum, .Ref => false,
+        else => true,
+    };
+}
 
-    pub fn set(self: *WriteRef, value: def.ObjectId) void {
-        self.value = value;
-    }
-};
+fn typeAlwaysTakesAllocator(comptime _: def.Type) bool {
+    return true;
+}
 
 fn deinitNewObject(
     allocator: std.mem.Allocator,
-    comptime object: def.ObjectScheme.Object,
-    value: *WriteNewObject(object),
+    comptime Object: type,
+    obj: *WriteNewObject(Object),
 ) void {
-    if (value.version) |*ver| {
-        switch (ver) {
+    if (obj.active) |*ver| {
+        switch (ver.*) {
             inline else => |*val, tag| {
-                const ver_type = object.versions[@intFromEnum(tag)];
+                const ver_type = Object.versions[@intFromEnum(tag)];
                 if (comptime newTypeAllocates(ver_type)) {
                     deinitNewType(allocator, ver_type, val);
                 }
@@ -1250,58 +1133,57 @@ fn deinitNewObject(
     }
 }
 
-fn deinitNewType(allocator: std.mem.Allocator, comptime typ: def.Type, value: *WriteNewType(typ)) void {
-    switch (typ) {
+fn deinitNewType(allocator: std.mem.Allocator, comptime Type: type, value: *WriteNewType(Type)) void {
+    switch (def.Type.from(Type).?) {
         .Void, .Bool, .Int, .Float, .Enum, .Ref => {},
         .String => {
             if (value.str) |str| {
                 allocator.free(str);
             }
         },
-        .Optional => |info| {
-            if (comptime newTypeAllocates(info.child.*)) {
+        .Optional => {
+            const Child = std.meta.Child(Type);
+            if (comptime newTypeAllocates(Child)) {
                 if (value.opt) |*opt| {
-                    deinitNewType(allocator, info.child.*, opt);
+                    deinitNewType(allocator, Child, opt);
                 }
             }
         },
-        .Array => |info| {
-            if (comptime newTypeAllocates(info.child.*)) {
+        .Array => {
+            const Child = std.meta.Child(Type);
+            if (comptime newTypeAllocates(Child)) {
                 for (value) |*elem| {
                     if (elem) |*e| {
-                        deinitNewType(allocator, info.child.*, e);
+                        deinitNewType(allocator, Child, e);
                     }
                 }
             }
         },
-        .List => |info| {
-            if (comptime newTypeAllocates(info.child.*)) {
+        .List => {
+            const Child = std.meta.Child(Type);
+            if (comptime newTypeAllocates(Child)) {
                 for (value.elems.items) |*elem| {
-                    deinitNewType(allocator, info.child.*, elem);
+                    deinitNewType(allocator, Child, elem);
                 }
             }
             value.elems.deinit();
         },
-        .Map => |info| {
-            if (comptime newTypeAllocates(info.key.*) or newTypeAllocates(info.value.*)) {
+        .Map => {
+            if (comptime newTypeAllocates(Type.key) or newTypeAllocates(Type.value)) {
                 for (value.entries.items) |*entry| {
-                    if (comptime newTypeAllocates(info.key.*)) {
-                        if (entry.key) |*key| {
-                            deinitNewType(allocator, info.key.*, key);
-                        }
+                    if (comptime newTypeAllocates(Type.key)) {
+                        deinitNewType(allocator, Type.key, &entry.key);
                     }
 
-                    if (comptime newTypeAllocates(info.value.*)) {
-                        if (entry.value) |*val| {
-                            deinitNewType(allocator, info.value.*, val);
-                        }
+                    if (comptime newTypeAllocates(Type.value)) {
+                        deinitNewType(allocator, Type.value, &entry.value);
                     }
                 }
             }
             value.entries.deinit();
         },
-        .Struct => |info| {
-            inline for (info.fields) |field| {
+        .Struct, .Tuple => {
+            inline for (std.meta.fields(Type)) |field| {
                 if (comptime newTypeAllocates(field.type)) {
                     if (@field(value, field.name)) |*val| {
                         deinitNewType(allocator, field.type, val);
@@ -1309,20 +1191,11 @@ fn deinitNewType(allocator: std.mem.Allocator, comptime typ: def.Type, value: *W
                 }
             }
         },
-        .Tuple => |info| {
-            inline for (info.fields, 0..) |f, i| {
-                if (comptime newTypeAllocates(f)) {
-                    if (value[i]) |*val| {
-                        deinitNewType(allocator, f, val);
-                    }
-                }
-            }
-        },
-        .Union => |info| {
+        .Union => {
             if (value.active) |*active| {
                 switch (active) {
                     inline else => |*val, tag| {
-                        const field_type = info.fields[@intFromEnum(tag)].type;
+                        const field_type = std.meta.fields(Type)[@intFromEnum(tag)].type;
                         if (comptime newTypeAllocates(field_type)) {
                             deinitNewType(allocator, field_type, val);
                         }
@@ -1333,47 +1206,15 @@ fn deinitNewType(allocator: std.mem.Allocator, comptime typ: def.Type, value: *W
     }
 }
 
-fn newOrMutateTypeAllocates(comptime typ: def.Type) bool {
-    return newTypeAllocates(typ) or mutateTypeAllocates(typ);
-}
-
-fn typeAlwaysTakesAllocator(comptime _: def.Type) bool {
-    return true;
-}
-
-fn newObjectAllocates(comptime object: def.ObjectScheme.Object) bool {
-    return for (object.versions) |ver| {
-        if (comptime newTypeAllocates(ver)) break true;
-    } else false;
-}
-
-fn newTypeAllocates(comptime typ: def.Type) bool {
-    return switch (typ) {
-        .Void, .Bool, .Int, .Float, .Enum, .Ref => false,
-        .String, .List, .Map => true,
-        .Optional => |info| comptime newTypeAllocates(info.child.*),
-        .Array => |info| comptime newTypeAllocates(info.child.*),
-        .Struct => |info| for (info.fields) |field| {
-            if (comptime newTypeAllocates(field.type)) break true;
-        } else false,
-        .Tuple => |info| for (info.fields) |field| {
-            if (comptime newTypeAllocates(field)) break true;
-        } else false,
-        .Union => |info| for (info.fields) |field| {
-            if (comptime newTypeAllocates(field.type)) break true;
-        } else false,
-    };
-}
-
 fn deinitMutateObject(
     allocator: std.mem.Allocator,
-    comptime object: def.ObjectScheme.Object,
-    value: *WriteMutateObject(object),
+    comptime Object: type,
+    obj: *WriteMutateObject(Object),
 ) void {
-    if (value.version) |*ver| {
-        switch (ver) {
+    if (obj.active) |*ver| {
+        switch (ver.*) {
             inline else => |*val, tag| {
-                const ver_type = object.versions[@intFromEnum(tag)];
+                const ver_type = Object.versions[@intFromEnum(tag)];
                 if (comptime newTypeAllocates(ver_type)) {
                     deinitMutateType(allocator, ver_type, val);
                 }
@@ -1382,11 +1223,11 @@ fn deinitMutateObject(
     }
 }
 
-fn deinitMutateType(allocator: std.mem.Allocator, comptime typ: def.Type, value: *WriteMutateType(typ)) void {
-    switch (typ) {
+fn deinitMutateType(allocator: std.mem.Allocator, comptime Type: type, value: *WriteMutateType(Type)) void {
+    switch (def.Type.from(Type).?) {
         .Void, .Bool, .Int, .Float, .Enum, .Ref => {},
         .String => {
-            for (value.ops.items) |op| {
+            for (value.elems.items) |op| {
                 switch (op) {
                     .Append => |str| {
                         allocator.free(str);
@@ -1400,82 +1241,77 @@ fn deinitMutateType(allocator: std.mem.Allocator, comptime typ: def.Type, value:
                     .Delete => {},
                 }
             }
-            value.ops.deinit();
+            value.elems.deinit();
         },
-        .Optional => |info| {
-            if (comptime mutateTypeAllocates(info.child.*)) {
+        .Optional => {
+            const Child = std.meta.Child(Type);
+            if (comptime mutateTypeAllocates(Child)) {
                 if (value.opt) |*opt| {
-                    deinitMutateType(allocator, info.child.*, opt);
+                    deinitMutateType(allocator, Child, opt);
                 }
             }
         },
-        .Array => |info| {
-            if (comptime mutateTypeAllocates(info.child.*)) {
-                for (value.ops.items) |*op| {
-                    deinitMutateType(allocator, info.child.*, &op.elem);
+        .Array => {
+            const Child = std.meta.Child(Type);
+            if (comptime mutateTypeAllocates(Child)) {
+                for (value.elems.items) |*op| {
+                    deinitMutateType(allocator, Child, &op.elem);
                 }
             }
-            value.ops.deinit();
+            value.elems.deinit();
         },
-        .List => |info| {
-            if (comptime newOrMutateTypeAllocates(info.child.*)) {
-                for (value.ops.items) |*op| {
+        .List => {
+            const Child = std.meta.Child(Type);
+            if (comptime newOrMutateTypeAllocates(Child)) {
+                for (value.elems.items) |*op| {
                     switch (op) {
                         .Append, .Prepend => |*elem| {
-                            deinitNewType(allocator, info.child.*, elem);
+                            deinitNewType(allocator, Child, elem);
                         },
                         .Insert => |*val| {
-                            deinitNewType(allocator, info.child.*, &val.elem);
+                            deinitNewType(allocator, Child, &val.elem);
                         },
                         .Delete => {},
                         .Mutate => |*val| {
-                            deinitMutateType(allocator, info.child.*, &val.elem);
+                            deinitMutateType(allocator, Child, &val.elem);
                         },
                     }
                 }
             }
-            value.ops.deinit();
+            value.elems.deinit();
         },
-        .Map => |info| {
-            if (comptime newTypeAllocates(info.key.*) or newOrMutateTypeAllocates(info.value.*)) {
-                for (value.ops.items) |*op| {
+        .Map => {
+            if (comptime newTypeAllocates(Type.key) or newOrMutateTypeAllocates(Type.value)) {
+                for (value.elems.items) |*op| {
                     switch (op) {
                         .Put => |*entry| {
-                            if (comptime newTypeAllocates(info.key.*)) {
-                                if (entry.key) |*key| {
-                                    deinitNewType(allocator, info.key.*, key);
-                                }
+                            if (comptime newTypeAllocates(Type.key)) {
+                                deinitNewType(allocator, Type.key, &entry.key);
                             }
-                            if (comptime newTypeAllocates(info.value.*)) {
-                                if (entry.value) |*val| {
-                                    deinitNewType(allocator, info.value.*, val);
-                                }
+                            if (comptime newTypeAllocates(Type.value)) {
+                                deinitNewType(allocator, Type.value, &entry.value);
                             }
                         },
                         .Remove => |*key| {
-                            if (comptime newTypeAllocates(info.key.*)) {
-                                deinitNewType(allocator, info.key.*, key);
+                            if (comptime newTypeAllocates(Type.key)) {
+                                deinitNewType(allocator, Type.key, key);
                             }
                         },
                         .Mutate => |*entry| {
-                            if (comptime newTypeAllocates(info.key.*)) {
-                                if (entry.key) |*key| {
-                                    deinitNewType(allocator, info.key.*, key);
-                                }
+                            if (comptime newTypeAllocates(Type.key)) {
+                                deinitNewType(allocator, Type.key, &entry.key);
                             }
-                            if (comptime mutateTypeAllocates(info.value.*)) {
-                                if (entry.value) |*val| {
-                                    deinitMutateType(allocator, info.value.*, val);
-                                }
+                            if (comptime mutateTypeAllocates(Type.value)) {
+                                deinitMutateType(allocator, Type.value, &entry.value);
                             }
                         },
                     }
                 }
             }
-            value.ops.deinit();
+            value.elems.deinit();
         },
-        .Struct => |info| {
-            inline for (info.fields) |field| {
+        .Struct, .Tuple => {
+            inline for (std.meta.fields(Type)) |field| {
                 if (comptime mutateTypeAllocates(field.type)) {
                     if (@field(value, field.name)) |*val| {
                         deinitMutateType(allocator, field.type, val);
@@ -1483,20 +1319,11 @@ fn deinitMutateType(allocator: std.mem.Allocator, comptime typ: def.Type, value:
                 }
             }
         },
-        .Tuple => |info| {
-            inline for (info.fields, 0..) |f, i| {
-                if (comptime mutateTypeAllocates(f)) {
-                    if (value[i]) |*val| {
-                        deinitMutateType(allocator, f, val);
-                    }
-                }
-            }
-        },
-        .Union => |info| {
+        .Union => {
             if (value.active) |*active| {
                 switch (active) {
                     inline else => |*val, tag| {
-                        const field_type = info.fields[@intFromEnum(tag)].type;
+                        const field_type = std.meta.fields(Type)[@intFromEnum(tag)].type;
                         if (comptime mutateTypeAllocates(field_type)) {
                             deinitMutateType(allocator, field_type, val);
                         }
@@ -1507,32 +1334,581 @@ fn deinitMutateType(allocator: std.mem.Allocator, comptime typ: def.Type, value:
     }
 }
 
-fn mutateObjectAllocates(comptime object: def.ObjectScheme.Object) bool {
-    return for (object.versions) |ver| {
-        if (comptime mutateTypeAllocates(ver)) break true;
-    } else false;
+pub const WriteError = error{
+    UnionValueNotSet,
+    ArrayElementNotSet,
+    OptionalValueNotSet,
+    StructFieldNotSet,
+    ValueNotSet,
+};
+
+pub fn write(
+    comptime ObjectRef: type,
+    value: *const WriteUpdateObject(ObjectRef),
+    out: *std.ArrayList(u8),
+) !void {
+    try chan.writeAdapted(
+        serde.UpdateObject(ObjectRef),
+        WriteError,
+        UpdateObjectAdapter(ObjectRef).init(value),
+        out,
+    );
 }
 
-fn mutateTypeAllocates(comptime typ: def.Type) bool {
-    return switch (typ) {
-        .Void, .Bool, .Int, .Float, .Enum, .Ref => false,
-        .String, .Array, .List, .Map => true,
-        .Optional => |info| comptime mutateTypeAllocates(info.child.*),
-        .Struct => |info| for (info.fields) |field| {
-            if (comptime mutateTypeAllocates(field.type)) break true;
-        } else false,
-        .Tuple => |info| for (info.fields) |field| {
-            if (comptime mutateTypeAllocates(field)) break true;
-        } else false,
-        .Union => |info| for (info.fields) |field| {
-            if (comptime mutateTypeAllocates(field.type)) break true;
-        } else false,
+fn UpdateObjectAdapter(comptime ObjectRef: type) type {
+    return struct {
+        val: *const Value,
+
+        const Value = WriteUpdateObject(ObjectRef);
+        const Tag = std.meta.Tag(serde.UpdateObject(ObjectRef));
+        const Self = @This();
+
+        pub fn init(val: *const Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn tag(self: Self) !Tag {
+            if (self.val.value) |*val| {
+                return val.*;
+            }
+            return error.UnionValueNotSet;
+        }
+
+        pub fn value(self: Self, comptime t: Tag) !FieldAdapter(t) {
+            if (self.val.value) |*val| {
+                return FieldAdapter(t).init(&@field(val, @tagName(t)));
+            }
+            return error.UnionValueNotSet;
+        }
+
+        fn FieldAdapter(comptime t: Tag) type {
+            return switch (t) {
+                .New => NewObjectAdapter(ObjectRef.def),
+                .Mutate => MutateObjectAdapter(ObjectRef.def),
+            };
+        }
     };
 }
 
-fn typeTakesAllocator(comptime typ: def.Type) bool {
-    return switch (typ) {
-        .Void, .Bool, .Int, .Float, .Enum, .Ref => false,
-        else => true,
+fn NewObjectAdapter(comptime Object: type) type {
+    return ObjectAdapter(
+        Object,
+        WriteNewObject,
+        serde.NewObject,
+        NewTypeAdapter,
+    );
+}
+
+fn NewTypeAdapter(comptime Type: type) type {
+    return switch (def.Type.from(Type).?) {
+        .Void, .Bool, .Int, .Float, .String, .Enum, .Ref => NewValueAdapter(Type),
+        .Optional => NewOptionalAdapter(Type),
+        .Array => NewArrayAdapter(Type),
+        .List => NewListAdapter(Type),
+        .Map => NewMapAdapter(Type),
+        .Struct, .Tuple => NewStructOrTupleAdapter(Type),
+        .Union => NewUnionAdapter(Type),
     };
+}
+
+fn NewValueAdapter(comptime Type: type) type {
+    return ValueAdapter(WriteNewType(Type), serde.NewType(Type));
+}
+
+fn NewOptionalAdapter(comptime Type: type) type {
+    return OptionalAdapter(WriteNewOptional(Type), NewTypeAdapter(std.meta.Child(Type)));
+}
+
+fn NewArrayAdapter(comptime Type: type) type {
+    return struct {
+        val: *const Value,
+
+        const ElemAdapter = NewTypeAdapter(Type.child);
+        const Value = WriteNewArray(Type);
+        const Self = @This();
+
+        pub fn init(val: *const Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn elem(self: Self, index: usize) !ElemAdapter {
+            if (self.val.elems[index]) |*e| {
+                return ElemAdapter.init(e);
+            }
+            return error.ArrayElementNotSet;
+        }
+    };
+}
+
+fn NewListAdapter(comptime Type: type) type {
+    return SliceAdapter(WriteNewList(Type), NewTypeAdapter(Type.child));
+}
+
+fn NewMapAdapter(comptime Type: type) type {
+    return SliceAdapter(
+        WriteNewMap(Type),
+        StructAdapter(
+            WriteNewMapEntry(Type),
+            struct {
+                key: Type.key,
+                value: Type.value,
+            },
+            WriteNewType,
+            NewTypeAdapter,
+            false,
+        ),
+    );
+}
+
+fn NewStructOrTupleAdapter(comptime Type: type) type {
+    return StructAdapter(WriteNewStruct(Type), Type, WriteNewType, NewTypeAdapter, false);
+}
+
+fn NewUnionAdapter(comptime Type: type) type {
+    return UnionAdapter(
+        WriteNewUnion(Type),
+        std.meta.Tag(serde.NewUnion(Type)),
+        Type,
+        NewTypeAdapter,
+    );
+}
+
+fn MutateObjectAdapter(comptime Object: type) type {
+    return ObjectAdapter(
+        Object,
+        WriteMutateObject,
+        serde.MutateObject,
+        MutateTypeAdapter,
+    );
+}
+
+fn MutateTypeAdapter(comptime Type: type) type {
+    return switch (def.Type.from(Type).?) {
+        .Void, .Bool, .Int, .Float, .Enum, .Ref => MutateValueAdapter(Type),
+        .String => MutateStringAdapter,
+        .Optional => MutateOptionalAdapter(Type),
+        .Array => MutateArrayAdapter(Type),
+        .List => MutateListAdapter(Type),
+        .Map => MutateMapAdapter(Type),
+        .Struct, .Tuple => MutateStructOrTupleAdapter(Type),
+        .Union => MutateUnionAdapter(Type),
+    };
+}
+
+fn MutateValueAdapter(comptime Type: type) type {
+    return ValueAdapter(WriteMutateType(Type), serde.MutateType(Type));
+}
+
+const MutateStringAdapter = SliceAdapter(WriteMutateString, DirectUnionAdapter(serde.MutateStringOp, struct {
+    fn FieldAdapter(comptime T: type) type {
+        return if (T == []const u8) DirectValueAdapter(T) else DirectStructAdapter(T, DirectValueAdapter);
+    }
+}));
+
+fn MutateOptionalAdapter(comptime Type: type) type {
+    return OptionalAdapter(WriteMutateOptional(Type), MutateTypeAdapter(std.meta.Child(Type)));
+}
+
+fn MutateArrayAdapter(comptime Type: type) type {
+    const Value = WriteMutateArray(Type);
+    const OpFieldAdapter = struct {
+        fn FieldAdapter(comptime T: type) type {
+            return if (T == Value.Element) MutateTypeAdapter(Type.child) else DirectValueAdapter(T);
+        }
+    }.FieldAdapter;
+    return SliceAdapter(Value, DirectStructAdapter(Value.Op, OpFieldAdapter));
+}
+
+fn MutateListAdapter(comptime Type: type) type {
+    const Value = WriteMutateList(Type);
+    const OpFieldAdapter = struct {
+        fn FieldAdapter(comptime T: type) type {
+            return if (T == Value.NewElement)
+                NewTypeAdapter(Type.child)
+            else if (T == Value.MutateElement)
+                MutateTypeAdapter(Type.child)
+            else if (T == Value.InsertOp or T == Value.MutateOp)
+                DirectStructAdapter(T, FieldAdapter)
+            else
+                DirectValueAdapter(T);
+        }
+    }.FieldAdapter;
+    return SliceAdapter(Value, DirectUnionAdapter(Value.Op, OpFieldAdapter));
+}
+
+fn MutateMapAdapter(comptime Type: type) type {
+    const Value = WriteMutateMap(Type);
+    const OpFieldAdapter = struct {
+        fn FieldAdapter(comptime T: type) type {
+            if (T == Value.NewEntry or T == Value.MutateEntry)
+                DirectStructAdapter(T, FieldAdapter)
+            else if (T == Value.NewKey)
+                NewTypeAdapter(Type.key)
+            else if (T == Value.NewEntry.Value)
+                NewTypeAdapter(Type.value)
+            else if (T == Value.MutateEntry.Value)
+                MutateTypeAdapter(Type.value)
+            else
+                @compileError("unexpected type");
+        }
+    }.FieldAdapter;
+    return SliceAdapter(Value, DirectUnionAdapter(Value.Op, OpFieldAdapter));
+}
+
+fn MutateStructOrTupleAdapter(comptime Type: type) type {
+    return StructAdapter(WriteMutateStruct(Type), Type, WriteMutateType, MutateTypeAdapter, true);
+}
+
+fn MutateUnionAdapter(comptime Type: type) type {
+    return UnionAdapter(
+        WriteMutateUnion(Type),
+        std.meta.Tag(serde.MutateUnion(Type)),
+        Type,
+        MutateTypeAdapter,
+    );
+}
+
+fn ObjectAdapter(
+    comptime Object: type,
+    comptime WriteObjectType: fn (type) type,
+    comptime ObjectAdapted: fn (type) type,
+    comptime VersionAdapter: fn (type) type,
+) type {
+    var fields: [Object.versions.len]std.builtin.Type.UnionField = undefined;
+    for (0..Object.versions.len) |i| {
+        fields[i] = .{
+            .name = meta.numFieldName(i),
+            .type = Object.versions[i],
+            .alignment = @alignOf(Object.versions[i]),
+        };
+    }
+    const Fields = @Type(.{
+        .Union = .{
+            .layout = .Auto,
+            .tag_type = null,
+            .fields = &fields,
+            .decls = &[_]std.builtin.Type.Declaration{},
+        },
+    });
+
+    return UnionAdapter(
+        WriteObjectType(Object),
+        std.meta.Tag(ObjectAdapted(Object)),
+        Fields,
+        VersionAdapter,
+    );
+}
+
+fn OptionalAdapter(comptime Value: type, comptime ChildAdapter: type) type {
+    return struct {
+        val: *const Value,
+
+        const Self = @This();
+
+        pub fn init(val: *const Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn value(self: Self) !?ChildAdapter {
+            if (self.val.opt) |*opt| {
+                return switch (opt) {
+                    .Some => |*val| ChildAdapter.init(val),
+                    .None => null,
+                };
+            }
+            return error.OptionalValueNotSet;
+        }
+    };
+}
+
+fn SliceAdapter(comptime Value: type, comptime ElemAdapter: type) type {
+    return struct {
+        val: *const Value,
+
+        const Self = @This();
+
+        pub fn init(val: *const Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn len(self: Self) !usize {
+            return self.val.elems.items.len;
+        }
+
+        pub fn elem(self: Self, index: usize) !ElemAdapter {
+            return ElemAdapter.init(&self.val.elems.items[index]);
+        }
+    };
+}
+
+fn StructAdapter(
+    comptime Value: type,
+    comptime Fields: type,
+    comptime FieldValue: fn (type) type,
+    comptime FieldAdapter: fn (type) type,
+    comptime allow_null: bool,
+) type {
+    return struct {
+        val: *const Value,
+
+        const Self = @This();
+
+        pub fn init(val: *const Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn field(self: Self, comptime index: comptime_int) !FieldAdapterAt(index) {
+            return FieldAdapterAt(index).init(&@field(self.val.fields, fieldInfo(index).name));
+        }
+
+        fn fieldInfo(comptime index: comptime_int) std.builtin.Type.StructField {
+            var i = 0;
+            for (std.meta.fields(Fields)) |f| {
+                if (def.Type.from(f.type) == null) continue;
+                if (i == index) return f;
+                i += 1;
+            }
+            @compileError("struct field index is invalid");
+        }
+
+        fn FieldAdapterAt(comptime index: comptime_int) type {
+            const info = fieldInfo(index);
+            return StructFieldAdapter(FieldValue(info.type), FieldAdapter(info.type), allow_null);
+        }
+    };
+}
+
+fn TupleAdapter(
+    comptime Value: type,
+    comptime Fields: type,
+    comptime FieldValue: fn (type) type,
+    comptime FieldAdapter: fn (type) type,
+    comptime allow_null: bool,
+) type {
+    return struct {
+        val: *const Value,
+
+        const Self = @This();
+
+        pub fn init(val: *const Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn field(self: Self, comptime index: comptime_int) !FieldAdapterAt(index) {
+            return FieldAdapterAt(index).init(&self.val.fields[index]);
+        }
+
+        fn FieldAdapterAt(comptime index: comptime_int) type {
+            var i = 0;
+            for (std.meta.fields(Fields)) |f| {
+                if (def.Type.from(f.type) == null) continue;
+                if (i == index) {
+                    return StructFieldAdapter(FieldValue(f.type), FieldAdapter(f.type), allow_null);
+                }
+                i += 1;
+            }
+            @compileError("tuple field index is invalid");
+        }
+    };
+}
+
+fn StructFieldAdapter(comptime Value: type, comptime FieldAdapter: type, comptime allow_null: bool) type {
+    return struct {
+        val: *const ?Value,
+
+        const Self = @This();
+
+        pub fn init(val: *const ?Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn value(self: Self) !if (allow_null) ?FieldAdapter else FieldAdapter {
+            if (self.val) |*val| {
+                return FieldAdapter.init(val);
+            }
+            return if (allow_null) null else error.StructFieldNotSet;
+        }
+    };
+}
+
+fn UnionAdapter(
+    comptime Value: type,
+    comptime Tag: type,
+    comptime Fields: type,
+    comptime FieldAdapter: fn (type) type,
+) type {
+    return struct {
+        val: *const Value,
+
+        const Self = @This();
+
+        pub fn init(val: *const Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn tag(self: Self) !Tag {
+            if (self.val.active) |*val| {
+                return @enumFromInt(@intFromEnum(val.*));
+            }
+            return error.UnionValueNotSet;
+        }
+
+        pub fn value(self: Self, comptime t: Tag) !FieldAdapterTag(t) {
+            if (self.val.active) |*val| {
+                return FieldAdapterTag(t).init(&@field(val, @tagName(t)));
+            }
+            return error.UnionValueNotSet;
+        }
+
+        fn fieldInfo(comptime t: Tag) std.builtin.Type.UnionField {
+            comptime {
+                const info = @typeInfo(Fields).Union;
+                var i = 0;
+                for (info.fields) |f| {
+                    if (def.Type.from(f.type) == null) continue;
+                    if (@intFromEnum(t) == i) {
+                        return f;
+                    }
+                    i += 1;
+                }
+                @compileError("union field tag is invalid");
+            }
+        }
+
+        fn FieldAdapterTag(comptime t: Tag) type {
+            const info = fieldInfo(t);
+            return FieldAdapter(info.type);
+        }
+    };
+}
+
+fn ValueAdapter(comptime Value: type, comptime Adapted: type) type {
+    return struct {
+        val: *const Value,
+
+        const Self = @This();
+
+        pub fn init(val: *const Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn value(self: Self) !Adapted {
+            if (self.val.value) |val| {
+                return val;
+            }
+            return error.ValueNotSet;
+        }
+    };
+}
+
+fn DirectValueAdapter(comptime Type: type) type {
+    return struct {
+        val: Type,
+
+        const Self = @This();
+
+        pub fn init(val: Type) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn value(self: Self) !Type {
+            return self.val;
+        }
+    };
+}
+
+fn DirectStructAdapter(comptime Type: type, comptime FieldAdapter: fn (type) type) type {
+    return struct {
+        val: Type,
+
+        const Self = @This();
+
+        pub fn init(val: Type) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn field(self: Self, comptime index: comptime_int) !FieldAdapterAt(index) {
+            const field_name = std.meta.fields(Type)[index].name;
+            return FieldAdapterAt(index).init(@field(self.val, field_name));
+        }
+
+        fn FieldAdapterAt(comptime index: comptime_int) type {
+            return FieldAdapter(std.meta.fields(Type)[index].type);
+        }
+    };
+}
+
+fn DirectUnionAdapter(comptime Type: type, comptime FieldAdapter: fn (type) type) type {
+    return struct {
+        val: Type,
+
+        const Tag = std.meta.Tag(Type);
+        const Self = @This();
+
+        pub fn init(val: Type) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn tag(self: Self) !Tag {
+            return self.val;
+        }
+
+        pub fn value(self: Self, comptime t: Tag) !FieldAdapterTag(t) {
+            const field_name = std.meta.fields(Type)[@intFromEnum(t)].name;
+            return FieldAdapterTag(t).init(@field(self.val, field_name));
+        }
+
+        fn FieldAdapterTag(comptime t: Tag) type {
+            return FieldAdapter(std.meta.fields(Type)[@intFromEnum(t)].type);
+        }
+    };
+}
+
+const TestObj = def.Scheme("scheme", .{
+    def.Object("Obj", .{
+        void,
+        //bool,
+        //u32,
+        //f32,
+        //def.String,
+        //?def.String,
+        //def.Array(10, u32),
+        //def.List(u32),
+        //def.Map(u32, u32),
+        //struct {
+        //    f1: u32,
+        //    f2: bool,
+        //},
+        //struct {
+        //    u32,
+        //    bool,
+        //},
+        //union(enum) {
+        //    f1: u32,
+        //    f2: bool,
+        //},
+        //enum {
+        //    f1,
+        //    f2,
+        //},
+        //def.This("Obj"),
+    }),
+}).ref("Obj");
+const TestWriter = WriteUpdateObject(TestObj);
+
+test "write new void" {
+    var writer = TestWriter.init(std.testing.allocator);
+    defer writer.deinit();
+
+    _ = writer.new()
+        .version(0);
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+
+    try write(TestObj, &writer, &out);
+
+    const view = chan.read(serde.UpdateObject(TestObj), out.items);
+
+    try std.testing.expect(view.tag() == .New);
 }

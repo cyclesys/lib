@@ -291,36 +291,45 @@ fn writeEnum(value: anytype, out: *std.ArrayList(u8)) !usize {
     return try writePacked(@intFromEnum(value), null, out);
 }
 
-pub fn writeAdapted(comptime Type: type, adapter: anytype, out: *std.ArrayList(u8)) !void {
-    _ = try writeValueAdapted(Type, adapter, out);
+pub fn writeAdapted(comptime Type: type, comptime Error: type, adapter: anytype, out: *std.ArrayList(u8)) !void {
+    _ = try writeValueAdapted(Type, Error || std.mem.Allocator.Error, adapter, out);
 }
 
-fn writeValueAdapted(comptime Type: type, adapter: anytype, out: *std.ArrayList(u8)) std.mem.Allocator.Error!usize {
+fn writeValueAdapted(comptime Type: type, comptime Error: type, adapter: anytype, out: *std.ArrayList(u8)) Error!usize {
     return switch (@typeInfo(Type)) {
-        .Void => {},
+        .Void => 0,
         .Bool, .Int, .Float => try writePacked(try adapter.value(), null, out),
         .Pointer => |info| switch (info.size) {
-            .One => try writeValueAdapted(info.child, adapter, out),
-            .Slice => try writePacked(try adapter.len(), null, out) + try writeSliceAdapted(info.child, adapter, try adapter.len(), out),
+            .One => try writeValueAdapted(info.child, Error, adapter, out),
+            .Slice => blk: {
+                if (info.child == u8) {
+                    const bytes = try adapter.value();
+                    const size = try writePacked(bytes.len, null, out);
+                    try out.appendSlice(bytes);
+                    break :blk size + bytes.len;
+                }
+                break :blk try writePacked(try adapter.len(), null, out) +
+                    try writeSliceAdapted(info.child, Error, adapter, try adapter.len(), out);
+            },
             else => @compileError("unsupported pointer type"),
         },
-        .Array => |info| try writeSliceAdapted(info.child, adapter, info.len, out),
-        .Struct => try writeStructAdapted(Type, adapter, out),
+        .Array => |info| try writeSliceAdapted(info.child, Error, adapter, info.len, out),
+        .Struct => try writeStructAdapted(Type, Error, adapter, out),
         .Optional => |info| if (try adapter.value()) |v|
-            try writePacked(@as(u8, 1), null, out) + try writeValueAdapted(info.child, v, out)
+            try writePacked(@as(u8, 1), null, out) + try writeValueAdapted(info.child, Error, v, out)
         else
             try writePacked(@as(u8, 0), null, out),
         .Enum => try writeEnum(try adapter.value(), out),
-        .Union => try writeUnionAdapted(Type, adapter, out),
+        .Union => try writeUnionAdapted(Type, Error, adapter, out),
         else => @compileError("unsupported type"),
     };
 }
 
-fn writeSliceAdapted(comptime Elem: type, adapter: anytype, len: usize, out: *std.ArrayList(u8)) !usize {
+fn writeSliceAdapted(comptime Elem: type, comptime Error: type, adapter: anytype, len: usize, out: *std.ArrayList(u8)) Error!usize {
     var size: usize = 0;
     if (comptime typeHasFixedSize(Elem)) {
         for (0..len) |i| {
-            size += try writeValueAdapted(Elem, try adapter.elem(i), out);
+            size += try writeValueAdapted(Elem, Error, try adapter.elem(i), out);
         }
     } else {
         var sizes_start = out.items.len;
@@ -330,7 +339,7 @@ fn writeSliceAdapted(comptime Elem: type, adapter: anytype, len: usize, out: *st
         size += sizes_size;
 
         for (0..len) |i| {
-            const elem_size = try writeValueAdapted(Elem, try adapter.elem(i), out);
+            const elem_size = try writeValueAdapted(Elem, Error, try adapter.elem(i), out);
             size += elem_size;
 
             const size_offset = sizes_start + (i * @sizeOf(usize));
@@ -340,18 +349,18 @@ fn writeSliceAdapted(comptime Elem: type, adapter: anytype, len: usize, out: *st
     return size;
 }
 
-fn writeStructAdapted(comptime Struct: type, adapter: anytype, out: *std.ArrayList(u8)) !usize {
+fn writeStructAdapted(comptime Struct: type, comptime Error: type, adapter: anytype, out: *std.ArrayList(u8)) Error!usize {
     const info = @typeInfo(Struct).Struct;
 
     var size: usize = 0;
     inline for (info.fields, 0..) |field, i| {
         if (comptime typeHasFixedSize(field.type)) {
-            size += try writeValueAdapted(field.type, try adapter.field(i), out);
+            size += try writeValueAdapted(field.type, Error, try adapter.field(i), out);
         } else {
             const size_offset = out.items.len;
             size += try writePacked(@as(usize, 0), null, out);
 
-            const field_size = try writeValueAdapted(field.type, try adapter.field(i), out);
+            const field_size = try writeValueAdapted(field.type, Error, try adapter.field(i), out);
             _ = try writePacked(field_size, size_offset, out);
             size += field_size;
         }
@@ -359,13 +368,13 @@ fn writeStructAdapted(comptime Struct: type, adapter: anytype, out: *std.ArrayLi
     return size;
 }
 
-fn writeUnionAdapted(comptime Union: type, adapter: anytype, out: *std.ArrayList(u8)) !usize {
+fn writeUnionAdapted(comptime Union: type, comptime Error: type, adapter: anytype, out: *std.ArrayList(u8)) Error!usize {
     const info = @typeInfo(Union).Union;
     switch (try adapter.tag()) {
         inline else => |tag| {
             const field_type = info.fields[@intFromEnum(tag)].type;
             var size = try writeEnum(tag, out);
-            size = try writeValueAdapted(field_type, try adapter.value(tag), out);
+            size = try writeValueAdapted(field_type, Error, try adapter.value(tag), out);
             return size;
         },
     }
@@ -701,7 +710,7 @@ fn serdeAdapted(value: anytype) !Serde(@TypeOf(value)) {
     var out = std.ArrayList(u8).init(std.testing.allocator);
 
     const Type = @TypeOf(value);
-    try writeAdapted(Type, Adapter(Type).init(value), &out);
+    try writeAdapted(Type, error{}, Adapter(Type).init(value), &out);
 
     const bytes = try out.toOwnedSlice();
     return .{
@@ -740,7 +749,10 @@ fn Adapter(comptime Type: type) type {
         .Void, .Bool, .Int, .Float, .Enum => ValueAdapter(Type),
         .Pointer => |info| switch (info.size) {
             .One => PointerAdapter(info.child),
-            .Slice => SliceAdapter(info.child),
+            .Slice => if (info.child == u8)
+                ValueAdapter(Type)
+            else
+                SliceAdapter(info.child),
             else => @compileError(""),
         },
         .Array => |info| ArrayAdapter(info.child, info.len),
