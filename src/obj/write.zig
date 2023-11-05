@@ -54,8 +54,8 @@ pub fn WriteUpdateObject(comptime ObjectRef: type) type {
 
         pub fn mutate(self: *Self) *Mutate {
             if (self.value) |*val| {
-                switch (val) {
-                    .New => |*n| deinitNewType(n),
+                switch (val.*) {
+                    .New => |*n| deinitNewObject(self.allocator, Object, n),
                     .Mutate => |*m| return m,
                 }
             }
@@ -90,7 +90,7 @@ fn WriteNewType(comptime Type: type) type {
         .Tuple => WriteNewTuple(Type),
         .Union => WriteNewUnion(Type),
         .Enum => WriteValue(Type),
-        .Ref => WriteValue(def.ObjectId),
+        .Ref => WriteValue(u64),
     };
 }
 
@@ -101,20 +101,20 @@ const WriteNewString = struct {
     pub fn init(allocator: std.mem.Allocator) WriteNewString {
         return WriteNewString{
             .allocator = allocator,
-            .str = null,
+            .value = null,
         };
     }
 
     pub fn set(self: *WriteNewString, str: []const u8) !void {
-        if (self.str) |old_str| {
+        if (self.value) |old_str| {
             self.allocator.free(old_str);
         }
-        self.str = try self.allocator.dupe(u8, str);
+        self.value = try self.allocator.dupe(u8, str);
     }
 };
 
 fn WriteNewOptional(comptime Type: type) type {
-    return WriteOptional(Type, WriteNewType, newTypeAllocates);
+    return WriteOptional(Type, WriteNewType, newTypeAllocates, deinitNewType);
 }
 
 fn WriteNewArray(comptime Type: type) type {
@@ -276,7 +276,7 @@ fn WriteNewTuple(comptime Type: type) type {
 }
 
 fn WriteNewUnion(comptime Type: type) type {
-    return WriteUnion(Type, WriteNewType, newTypeAllocates);
+    return WriteUnion(Type, WriteNewType, newTypeAllocates, false);
 }
 
 fn WriteMutateObject(comptime Object: type) type {
@@ -285,10 +285,7 @@ fn WriteMutateObject(comptime Object: type) type {
 
 fn WriteMutateType(comptime Type: type) type {
     return switch (def.Type.from(Type).?) {
-        .Void => WriteValue(void),
-        .Bool => WriteValue(bool),
-        .Int => WriteValue(Type),
-        .Float => WriteValue(Type),
+        .Void, .Bool, .Int, .Float, .Enum, .Ref => WriteNewType(Type),
         .String => WriteMutateString,
         .Optional => WriteMutateOptional(Type),
         .Array => WriteMutateArray(Type),
@@ -297,8 +294,6 @@ fn WriteMutateType(comptime Type: type) type {
         .Struct => WriteMutateStruct(Type),
         .Tuple => WriteMutateTuple(Type),
         .Union => WriteMutateUnion(Type),
-        .Enum => WriteValue(Type),
-        .Ref => WriteValue(def.ObjectId),
     };
 }
 
@@ -343,7 +338,7 @@ const WriteMutateString = struct {
 };
 
 fn WriteMutateOptional(comptime Type: type) type {
-    return WriteOptional(Type, WriteMutateType, mutateTypeAllocates);
+    return WriteOptional(Type, WriteMutateType, mutateTypeAllocates, deinitMutateType);
 }
 
 fn WriteMutateArray(comptime Type: type) type {
@@ -604,7 +599,7 @@ fn WriteMutateTuple(comptime Type: type) type {
 }
 
 fn WriteMutateUnion(comptime Type: type) type {
-    return WriteUnion(Type, WriteMutateUnionField, newOrMutateTypeAllocates);
+    return WriteUnion(Type, WriteMutateUnionField, newOrMutateTypeAllocates, true);
 }
 
 fn WriteMutateUnionField(comptime Type: type) type {
@@ -630,10 +625,12 @@ fn WriteMutateUnionField(comptime Type: type) type {
 
         pub fn new(self: *Self) *New {
             if (self.active) |*active| {
-                switch (active) {
+                switch (active.*) {
                     .New => |*n| return n,
                     .Mutate => |*m| {
-                        deinitMutateType(m);
+                        if (comptime mutateTypeAllocates(Type)) {
+                            deinitMutateType(self.allocator, Type, m);
+                        }
                     },
                 }
             }
@@ -653,9 +650,11 @@ fn WriteMutateUnionField(comptime Type: type) type {
 
         pub fn mutate(self: *Self) *Mutate {
             if (self.active) |*active| {
-                switch (active) {
+                switch (active.*) {
                     .New => |*n| {
-                        deinitNewType(n);
+                        if (comptime newTypeAllocates(Type)) {
+                            deinitNewType(self.allocator, Type, n);
+                        }
                     },
                     .Mutate => |*m| return m,
                 }
@@ -691,7 +690,7 @@ fn WriteObject(
             var fields: [tag_fields.len]std.builtin.Type.UnionField = undefined;
             for (Object.versions, 0..) |Ver, i| {
                 tag_fields[i] = .{
-                    .name = "V" ++ meta.numFieldName(i),
+                    .name = "v" ++ meta.numFieldName(i),
                     .value = i,
                 };
 
@@ -729,7 +728,7 @@ fn WriteObject(
         }
 
         pub fn version(self: *Self, comptime num: comptime_int) *WriteType(Object.versions[num]) {
-            const field_name = "V" ++ comptime meta.numFieldName(num);
+            const field_name = "v" ++ comptime meta.numFieldName(num);
             const field_type = Object.versions[num];
             if (self.active) |*active| {
                 const val = &@field(active, field_name);
@@ -796,7 +795,7 @@ fn WriteOptional(
         pub fn init(allocator: Allocator) Self {
             return Self{
                 .allocator = allocator,
-                .value = .None,
+                .opt = .None,
             };
         }
 
@@ -812,12 +811,12 @@ fn WriteOptional(
                     self.opt = Option{ .Some = FieldType.init() };
                 }
             }
-            return &self.opt.Some.?;
+            return &self.opt.?.Some;
         }
 
         pub fn none(self: *Self) void {
             if (self.opt) |*opt| {
-                switch (opt) {
+                switch (opt.*) {
                     .Some => |*val| {
                         if (comptime typeAllocates(Child)) {
                             deinitChild(self.allocator, Child, val);
@@ -841,7 +840,7 @@ fn WriteStruct(
 
         pub const Fields = blk: {
             const info = @typeInfo(Type).Struct;
-            var fields: [info.fields.len]std.builtin.Type.Struct = undefined;
+            var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
             for (info.fields, 0..) |f, i| {
                 const FT = ?WriteType(f.type);
                 fields[i] = .{
@@ -914,7 +913,7 @@ fn WriteTuple(
 
         pub const Fields = blk: {
             const info = @typeInfo(Type).Struct;
-            var fields: [info.fields.len]std.builtin.Type.Struct = undefined;
+            var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
             for (info.fields, 0..) |f, i| {
                 const FT = ?WriteType(f.type);
                 fields[i] = .{
@@ -942,7 +941,7 @@ fn WriteTuple(
         }
 
         const Allocator = for (std.meta.fields(Type)) |f| {
-            if (newTypeAllocates(f)) break std.mem.Allocator;
+            if (newTypeAllocates(f.type)) break std.mem.Allocator;
         } else void;
         const Self = @This();
 
@@ -979,6 +978,7 @@ fn WriteUnion(
     comptime Type: type,
     comptime WriteType: fn (type) type,
     comptime typeAllocates: fn (type) bool,
+    comptime takes_allocator: bool,
 ) type {
     return struct {
         allocator: Allocator,
@@ -1038,7 +1038,7 @@ fn WriteUnion(
             const field_name = @tagName(name);
             const field_type = std.meta.fields(Type)[@intFromEnum(name)].type;
             if (self.active) |*active| {
-                switch (active) {
+                switch (active.*) {
                     inline else => |*val, tag| {
                         if (@intFromEnum(tag) == @intFromEnum(name)) {
                             return val;
@@ -1051,7 +1051,7 @@ fn WriteUnion(
                 }
             }
 
-            if (comptime typeTakesAllocator(field_type)) {
+            if (takes_allocator or comptime typeTakesAllocator(field_type)) {
                 if (comptime typeAllocates(field_type)) {
                     self.active = @unionInit(Fields, field_name, FieldType(name).init(self.allocator));
                 } else {
@@ -1137,7 +1137,7 @@ fn deinitNewType(allocator: std.mem.Allocator, comptime Type: type, value: *Writ
     switch (def.Type.from(Type).?) {
         .Void, .Bool, .Int, .Float, .Enum, .Ref => {},
         .String => {
-            if (value.str) |str| {
+            if (value.value) |str| {
                 allocator.free(str);
             }
         },
@@ -1224,7 +1224,7 @@ fn deinitMutateObject(
 }
 
 fn deinitMutateType(allocator: std.mem.Allocator, comptime Type: type, value: *WriteMutateType(Type)) void {
-    switch (def.Type.from(Type).?) {
+    switch (comptime def.Type.from(Type).?) {
         .Void, .Bool, .Int, .Float, .Enum, .Ref => {},
         .String => {
             for (value.elems.items) |op| {
@@ -1252,28 +1252,26 @@ fn deinitMutateType(allocator: std.mem.Allocator, comptime Type: type, value: *W
             }
         },
         .Array => {
-            const Child = std.meta.Child(Type);
-            if (comptime mutateTypeAllocates(Child)) {
+            if (comptime mutateTypeAllocates(Type.child)) {
                 for (value.elems.items) |*op| {
-                    deinitMutateType(allocator, Child, &op.elem);
+                    deinitMutateType(allocator, Type.child, &op.elem);
                 }
             }
             value.elems.deinit();
         },
         .List => {
-            const Child = std.meta.Child(Type);
-            if (comptime newOrMutateTypeAllocates(Child)) {
+            if (comptime newOrMutateTypeAllocates(Type.child)) {
                 for (value.elems.items) |*op| {
                     switch (op) {
                         .Append, .Prepend => |*elem| {
-                            deinitNewType(allocator, Child, elem);
+                            deinitNewType(allocator, Type.child, elem);
                         },
                         .Insert => |*val| {
-                            deinitNewType(allocator, Child, &val.elem);
+                            deinitNewType(allocator, Type.child, &val.elem);
                         },
                         .Delete => {},
                         .Mutate => |*val| {
-                            deinitMutateType(allocator, Child, &val.elem);
+                            deinitMutateType(allocator, Type.child, &val.elem);
                         },
                     }
                 }
@@ -1406,7 +1404,8 @@ fn NewTypeAdapter(comptime Type: type) type {
         .Array => NewArrayAdapter(Type),
         .List => NewListAdapter(Type),
         .Map => NewMapAdapter(Type),
-        .Struct, .Tuple => NewStructOrTupleAdapter(Type),
+        .Struct => NewStructAdapter(Type),
+        .Tuple => NewTupleAdapter(Type),
         .Union => NewUnionAdapter(Type),
     };
 }
@@ -1460,8 +1459,12 @@ fn NewMapAdapter(comptime Type: type) type {
     );
 }
 
-fn NewStructOrTupleAdapter(comptime Type: type) type {
+fn NewStructAdapter(comptime Type: type) type {
     return StructAdapter(WriteNewStruct(Type), Type, WriteNewType, NewTypeAdapter, false);
+}
+
+fn NewTupleAdapter(comptime Type: type) type {
+    return TupleAdapter(WriteNewTuple(Type), Type, WriteNewType, NewTypeAdapter, false);
 }
 
 fn NewUnionAdapter(comptime Type: type) type {
@@ -1490,7 +1493,8 @@ fn MutateTypeAdapter(comptime Type: type) type {
         .Array => MutateArrayAdapter(Type),
         .List => MutateListAdapter(Type),
         .Map => MutateMapAdapter(Type),
-        .Struct, .Tuple => MutateStructOrTupleAdapter(Type),
+        .Struct => MutateStructAdapter(Type),
+        .Tuple => MutateTupleAdapter(Type),
         .Union => MutateUnionAdapter(Type),
     };
 }
@@ -1499,11 +1503,11 @@ fn MutateValueAdapter(comptime Type: type) type {
     return ValueAdapter(WriteMutateType(Type), serde.MutateType(Type));
 }
 
-const MutateStringAdapter = SliceAdapter(WriteMutateString, DirectUnionAdapter(serde.MutateStringOp, struct {
-    fn FieldAdapter(comptime T: type) type {
-        return if (T == []const u8) DirectValueAdapter(T) else DirectStructAdapter(T, DirectValueAdapter);
-    }
-}));
+const MutateStringAdapter = SliceAdapter(WriteMutateString, DirectUnionAdapter(serde.MutateStringOp, MutateStringOpAdapter));
+
+fn MutateStringOpAdapter(comptime T: type) type {
+    return if (T == []const u8) DirectValueAdapter(T) else DirectStructAdapter(T, DirectValueAdapter);
+}
 
 fn MutateOptionalAdapter(comptime Type: type) type {
     return OptionalAdapter(WriteMutateOptional(Type), MutateTypeAdapter(std.meta.Child(Type)));
@@ -1555,8 +1559,12 @@ fn MutateMapAdapter(comptime Type: type) type {
     return SliceAdapter(Value, DirectUnionAdapter(Value.Op, OpFieldAdapter));
 }
 
-fn MutateStructOrTupleAdapter(comptime Type: type) type {
+fn MutateStructAdapter(comptime Type: type) type {
     return StructAdapter(WriteMutateStruct(Type), Type, WriteMutateType, MutateTypeAdapter, true);
+}
+
+fn MutateTupleAdapter(comptime Type: type) type {
+    return TupleAdapter(WriteMutateTuple(Type), Type, WriteMutateType, MutateTypeAdapter, true);
 }
 
 fn MutateUnionAdapter(comptime Type: type) type {
@@ -1564,7 +1572,27 @@ fn MutateUnionAdapter(comptime Type: type) type {
         WriteMutateUnion(Type),
         std.meta.Tag(serde.MutateUnion(Type)),
         Type,
-        MutateTypeAdapter,
+        MutateUnionFieldAdapter,
+    );
+}
+
+fn MutateUnionFieldAdapter(comptime Type: type) type {
+    const Value = WriteMutateUnionField(Type);
+    const FieldAdapter = struct {
+        fn FieldAdapter(comptime T: type) type {
+            return if (T == Value.New)
+                NewTypeAdapter(Type)
+            else if (T == Value.Mutate)
+                MutateTypeAdapter(Type)
+            else
+                @compileError("unexpected type");
+        }
+    }.FieldAdapter;
+    return UnionAdapter(
+        Value,
+        std.meta.Tag(serde.MutateUnionField(Type)),
+        Value.Active,
+        FieldAdapter,
     );
 }
 
@@ -1611,7 +1639,7 @@ fn OptionalAdapter(comptime Value: type, comptime ChildAdapter: type) type {
 
         pub fn value(self: Self) !?ChildAdapter {
             if (self.val.opt) |*opt| {
-                return switch (opt) {
+                return switch (opt.*) {
                     .Some => |*val| ChildAdapter.init(val),
                     .None => null,
                 };
@@ -1658,7 +1686,12 @@ fn StructAdapter(
         }
 
         pub fn field(self: Self, comptime index: comptime_int) !FieldAdapterAt(index) {
-            return FieldAdapterAt(index).init(&@field(self.val.fields, fieldInfo(index).name));
+            return if (allow_null)
+                return FieldAdapterAt(index).init(&@field(self.val.fields, fieldInfo(index).name))
+            else if (@field(self.val.fields, fieldInfo(index).name)) |*val|
+                FieldAdapterAt(index).init(val)
+            else
+                error.StructFieldNotSet;
         }
 
         fn fieldInfo(comptime index: comptime_int) std.builtin.Type.StructField {
@@ -1673,7 +1706,10 @@ fn StructAdapter(
 
         fn FieldAdapterAt(comptime index: comptime_int) type {
             const info = fieldInfo(index);
-            return StructFieldAdapter(FieldValue(info.type), FieldAdapter(info.type), allow_null);
+            return if (allow_null)
+                NullableStructFieldAdapter(FieldValue(info.type), FieldAdapter(info.type))
+            else
+                FieldAdapter(info.type);
         }
     };
 }
@@ -1695,7 +1731,12 @@ fn TupleAdapter(
         }
 
         pub fn field(self: Self, comptime index: comptime_int) !FieldAdapterAt(index) {
-            return FieldAdapterAt(index).init(&self.val.fields[index]);
+            return if (allow_null)
+                FieldAdapterAt(index).init(&self.val.fields[index])
+            else if (self.val.fields[index]) |*val|
+                FieldAdapterAt(index).init(val)
+            else
+                error.StructFieldNotSet;
         }
 
         fn FieldAdapterAt(comptime index: comptime_int) type {
@@ -1703,7 +1744,10 @@ fn TupleAdapter(
             for (std.meta.fields(Fields)) |f| {
                 if (def.Type.from(f.type) == null) continue;
                 if (i == index) {
-                    return StructFieldAdapter(FieldValue(f.type), FieldAdapter(f.type), allow_null);
+                    return if (allow_null)
+                        NullableStructFieldAdapter(FieldValue(f.type), FieldAdapter(f.type))
+                    else
+                        return FieldAdapter(f.type);
                 }
                 i += 1;
             }
@@ -1712,7 +1756,7 @@ fn TupleAdapter(
     };
 }
 
-fn StructFieldAdapter(comptime Value: type, comptime FieldAdapter: type, comptime allow_null: bool) type {
+fn NullableStructFieldAdapter(comptime Value: type, comptime FieldAdapter: type) type {
     return struct {
         val: *const ?Value,
 
@@ -1722,11 +1766,11 @@ fn StructFieldAdapter(comptime Value: type, comptime FieldAdapter: type, comptim
             return Self{ .val = val };
         }
 
-        pub fn value(self: Self) !if (allow_null) ?FieldAdapter else FieldAdapter {
-            if (self.val) |*val| {
+        pub fn value(self: Self) !?FieldAdapter {
+            if (self.val.*) |*val| {
                 return FieldAdapter.init(val);
             }
-            return if (allow_null) null else error.StructFieldNotSet;
+            return null;
         }
     };
 }
@@ -1864,51 +1908,436 @@ fn DirectUnionAdapter(comptime Type: type, comptime FieldAdapter: fn (type) type
     };
 }
 
+test "write void" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    _ = writer.obj.new()
+        .version(0);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .New);
+    {
+        var obj_view = view.value(.New);
+        try std.testing.expect(obj_view.tag() == .v0);
+    }
+
+    _ = writer.obj.mutate()
+        .version(0);
+
+    view = try writer.view();
+    try std.testing.expect(view.tag() == .Mutate);
+    {
+        var obj_view = view.value(.Mutate);
+        try std.testing.expect(obj_view.tag() == .v0);
+    }
+}
+
+test "write bool" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    writer.obj.new()
+        .version(1)
+        .set(true);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .New);
+    {
+        var obj_view = view.value(.New);
+        try std.testing.expect(obj_view.tag() == .v1);
+        try std.testing.expect(obj_view.value(.v1));
+    }
+
+    writer.obj.mutate()
+        .version(1)
+        .set(false);
+
+    view = try writer.view();
+    try std.testing.expect(view.tag() == .Mutate);
+    {
+        var obj_view = view.value(.Mutate);
+        try std.testing.expect(obj_view.tag() == .v1);
+        try std.testing.expect(!obj_view.value(.v1));
+    }
+}
+
+test "write int" {
+    const expected_int = 16578;
+
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    writer.obj.new()
+        .version(2)
+        .set(expected_int);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .New);
+    {
+        var obj_view = view.value(.New);
+        try std.testing.expect(obj_view.tag() == .v2);
+        try std.testing.expect(obj_view.value(.v2) == expected_int);
+    }
+
+    writer.obj.mutate()
+        .version(2)
+        .set(expected_int);
+
+    view = try writer.view();
+    try std.testing.expect(view.tag() == .Mutate);
+    {
+        var obj_view = view.value(.Mutate);
+        try std.testing.expect(obj_view.tag() == .v2);
+        try std.testing.expect(obj_view.value(.v2) == expected_int);
+    }
+}
+
+test "write float" {
+    const expected_float = 16578.10898;
+
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    writer.obj.new()
+        .version(3)
+        .set(expected_float);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .New);
+    {
+        var obj_view = view.value(.New);
+        try std.testing.expect(obj_view.tag() == .v3);
+        try std.testing.expect(obj_view.value(.v3) == expected_float);
+    }
+
+    writer.obj.mutate()
+        .version(3)
+        .set(expected_float);
+
+    view = try writer.view();
+    try std.testing.expect(view.tag() == .Mutate);
+    {
+        var obj_view = view.value(.Mutate);
+        try std.testing.expect(obj_view.tag() == .v3);
+        try std.testing.expect(obj_view.value(.v3) == expected_float);
+    }
+}
+
+test "write enum" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    writer.obj.new()
+        .version(4)
+        .set(.f1);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .New);
+    {
+        var obj_view = view.value(.New);
+        try std.testing.expect(obj_view.tag() == .v4);
+        try std.testing.expect(obj_view.value(.v4) == .f1);
+    }
+
+    writer.obj.mutate()
+        .version(4)
+        .set(.f2);
+
+    view = try writer.view();
+    try std.testing.expect(view.tag() == .Mutate);
+    {
+        var obj_view = view.value(.Mutate);
+        try std.testing.expect(obj_view.tag() == .v4);
+        try std.testing.expect(obj_view.value(.v4) == .f2);
+    }
+}
+
+test "write ref" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    writer.obj.new()
+        .version(5)
+        .set(300);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .New);
+    {
+        var obj_view = view.value(.New);
+        try std.testing.expect(obj_view.tag() == .v5);
+        try std.testing.expect(obj_view.value(.v5) == 300);
+    }
+
+    writer.obj.mutate()
+        .version(5)
+        .set(200);
+
+    view = try writer.view();
+    try std.testing.expect(view.tag() == .Mutate);
+    {
+        var obj_view = view.value(.Mutate);
+        try std.testing.expect(obj_view.tag() == .v5);
+        try std.testing.expect(obj_view.value(.v5) == 200);
+    }
+}
+
+// TODO: for some reason this test does not compile.
+//test "write new string" {
+//    var writer = TestWriter.init();
+//    defer writer.deinit();
+//
+//    var str = writer.obj.new()
+//        .version(6);
+//    try str.set("Hello");
+//
+//    var view = try writer.view();
+//    try std.testing.expect(view.tag() == .New);
+//    {
+//        var obj_view = view.value(.New);
+//        try std.testing.expect(obj_view.tag() == .v6);
+//        try std.testing.expect(std.mem.eql(u8, obj_view.value(.v6), "Hello"));
+//    }
+//}
+
+test "write optional bool" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    writer.obj.new()
+        .version(6)
+        .some()
+        .set(true);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .New);
+    {
+        var obj_view = view.value(.New);
+        try std.testing.expect(obj_view.tag() == .v6);
+        try std.testing.expect(obj_view.value(.v6) == true);
+    }
+
+    writer.obj.mutate()
+        .version(6)
+        .none();
+
+    view = try writer.view();
+    try std.testing.expect(view.tag() == .Mutate);
+    {
+        var obj_view = view.value(.Mutate);
+        try std.testing.expect(obj_view.tag() == .v6);
+        try std.testing.expect(obj_view.value(.v6) == null);
+    }
+}
+
+// TODO: does not compile due to compiler segfault
+//test "write new array" {
+//    var writer = TestWriter.init();
+//    defer writer.deinit();
+//
+//    var array = writer.obj.new()
+//        .version(7);
+//
+//    array.elem(0).set(100);
+//    array.elem(1).set(200);
+//
+//    var view = try writer.view();
+//    try std.testing.expect(view.tag() == .New);
+//    {
+//        var obj_view = view.value(.New);
+//        try std.testing.expect(obj_view.tag() == .v7);
+//
+//        var array_view = obj_view.value(.v7);
+//        try std.testing.expect(array_view.elem(0) == 100);
+//        try std.testing.expect(array_view.elem(1) == 200);
+//    }
+//}
+
+// TODO: does not compile due to compiler segfault
+//test "write new list" {
+//    var writer = TestWriter.init();
+//    defer writer.deinit();
+//
+//    var list = writer.obj.new()
+//        .version(7);
+//
+//    try list.append(100);
+//    try list.append(200);
+//
+//    var view = try writer.view();
+//    try std.testing.expect(view.tag() == .New);
+//}
+
+// TODO: does not compile due to compiler segfault
+//test "write new map" {
+//    var writer = TestWriter.init();
+//    defer writer.deinit();
+//
+//    var map = writer.obj.new()
+//        .version(7);
+//
+//    var entry = try map.put();
+//    entry.key.set(100);
+//    entry.value.set(100);
+//
+//    var view = try writer.view();
+//    try std.testing.expect(view.tag() == .New);
+//}
+
+test "write new struct" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    var val = writer.obj.new()
+        .version(7);
+
+    val.field(.f1).set(100);
+    val.field(.f2).set(true);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .New);
+
+    var struct_view = view.value(.New).value(.v7);
+    try std.testing.expectEqual(@as(u32, 100), struct_view.field(.f1));
+    try std.testing.expect(struct_view.field(.f2));
+}
+
+test "write mutate struct" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    var val = writer.obj.mutate()
+        .version(7);
+
+    val.field(.f2).set(true);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .Mutate);
+
+    var struct_view = view.value(.Mutate).value(.v7);
+    try std.testing.expectEqual(@as(?u32, null), struct_view.field(.f1));
+    try std.testing.expectEqual(@as(?bool, true), struct_view.field(.f2));
+}
+
+test "write new tuple" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    var val = writer.obj.new()
+        .version(8);
+
+    val.field(0).set(100);
+    val.field(1).set(true);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .New);
+
+    var struct_view = view.value(.New).value(.v8);
+    try std.testing.expectEqual(@as(u32, 100), struct_view.field(0));
+    try std.testing.expect(struct_view.field(1));
+}
+
+test "write mutate tuple" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    var val = writer.obj.mutate()
+        .version(8);
+
+    val.field(1).set(true);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .Mutate);
+
+    var struct_view = view.value(.Mutate).value(.v8);
+    try std.testing.expectEqual(@as(?u32, null), struct_view.field(0));
+    try std.testing.expectEqual(@as(?bool, true), struct_view.field(1));
+}
+
+test "write new union" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    var val = writer.obj.new()
+        .version(9);
+
+    val.field(.f1).set(123);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .New);
+
+    var union_view = view.value(.New).value(.v9);
+    try std.testing.expect(union_view.tag() == .f1);
+    try std.testing.expectEqual(@as(u32, 123), union_view.value(.f1));
+}
+
+test "write mutate union" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
+
+    var val = writer.obj.mutate()
+        .version(9);
+
+    val.field(.f2).new().set(true);
+
+    var view = try writer.view();
+    try std.testing.expect(view.tag() == .Mutate);
+
+    var union_view = view.value(.Mutate).value(.v9);
+    try std.testing.expect(union_view.tag() == .f2);
+
+    var f2_view = union_view.value(.f2);
+    try std.testing.expect(f2_view.tag() == .New);
+    try std.testing.expectEqual(true, f2_view.value(.New));
+}
+
 const TestObj = def.Scheme("scheme", .{
     def.Object("Obj", .{
         void,
-        //bool,
-        //u32,
-        //f32,
+        bool,
+        u32,
+        f32,
+        enum { f1, f2 },
+        def.This("Obj"),
         //def.String,
-        //?def.String,
-        //def.Array(10, u32),
+        ?bool,
+        //def.Array(2, u32),
         //def.List(u32),
         //def.Map(u32, u32),
-        //struct {
-        //    f1: u32,
-        //    f2: bool,
-        //},
-        //struct {
-        //    u32,
-        //    bool,
-        //},
-        //union(enum) {
-        //    f1: u32,
-        //    f2: bool,
-        //},
-        //enum {
-        //    f1,
-        //    f2,
-        //},
-        //def.This("Obj"),
+        struct {
+            f1: u32,
+            f2: bool,
+        },
+        struct {
+            u32,
+            bool,
+        },
+        union(enum) {
+            f1: u32,
+            f2: bool,
+        },
     }),
 }).ref("Obj");
-const TestWriter = WriteUpdateObject(TestObj);
 
-test "write new void" {
-    var writer = TestWriter.init(std.testing.allocator);
-    defer writer.deinit();
+const TestWriter = struct {
+    obj: WriteUpdateObject(TestObj),
+    out: std.ArrayList(u8),
 
-    _ = writer.new()
-        .version(0);
+    fn init() TestWriter {
+        return TestWriter{
+            .obj = WriteUpdateObject(TestObj).init(std.testing.allocator),
+            .out = std.ArrayList(u8).init(std.testing.allocator),
+        };
+    }
 
-    var out = std.ArrayList(u8).init(std.testing.allocator);
-    defer out.deinit();
+    fn deinit(self: *TestWriter) void {
+        self.obj.deinit();
+        self.out.deinit();
+    }
 
-    try write(TestObj, &writer, &out);
-
-    const view = chan.read(serde.UpdateObject(TestObj), out.items);
-
-    try std.testing.expect(view.tag() == .New);
-}
+    fn view(self: *TestWriter) !chan.View(serde.UpdateObject(TestObj)) {
+        self.out.clearRetainingCapacity();
+        try write(TestObj, &self.obj, &self.out);
+        return chan.read(serde.UpdateObject(TestObj), self.out.items);
+    }
+};

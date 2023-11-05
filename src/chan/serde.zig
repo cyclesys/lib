@@ -57,18 +57,36 @@ fn StructView(comptime Type: type) type {
 
         const Self = @This();
 
-        pub fn field(self: Self, comptime name: std.meta.FieldEnum(Type)) View(std.meta.FieldType(Type, name)) {
+        const FieldName = if (@typeInfo(Type).Struct.is_tuple)
+            comptime_int
+        else
+            std.meta.FieldEnum(Type);
+
+        fn FieldType(comptime name: FieldName) type {
+            const info = @typeInfo(Type).Struct;
+            const field_index = if (info.is_tuple) name else @intFromEnum(name);
+            return info.fields[field_index].type;
+        }
+
+        fn fieldIndex(comptime name: FieldName) comptime_int {
+            return if (@typeInfo(Type).Struct.is_tuple)
+                name
+            else
+                @intFromEnum(name);
+        }
+
+        pub fn field(self: Self, comptime name: FieldName) View(FieldType(name)) {
             const info = @typeInfo(Type).Struct;
             const fixed_offset: ?usize = comptime blk: {
                 var offset: usize = 0;
                 for (info.fields, 0..) |f, i| {
-                    if (i == @intFromEnum(name)) {
+                    if (i == fieldIndex(name)) {
                         break;
                     }
                     if (!typeHasFixedSize(f.type)) {
                         break :blk null;
                     }
-                    offset += @sizeOf(f.type);
+                    offset += sizeOf(f.type);
                 }
                 break :blk offset;
             };
@@ -77,10 +95,10 @@ fn StructView(comptime Type: type) type {
             if (fixed_offset) |fo| {
                 offset = fo;
             } else {
-                const preceding_fields = info.fields[0..@intFromEnum(name)];
+                const preceding_fields = info.fields[0..fieldIndex(name)];
                 inline for (preceding_fields) |f| {
                     if (comptime typeHasFixedSize(f.type)) {
-                        offset += @sizeOf(f.type);
+                        offset += sizeOf(f.type);
                     } else {
                         const field_size = readPacked(usize, self.bytes[offset..]);
                         offset += @sizeOf(usize);
@@ -89,11 +107,11 @@ fn StructView(comptime Type: type) type {
                 }
             }
 
-            if (!comptime typeHasFixedSize(std.meta.FieldType(Type, name))) {
+            if (!comptime typeHasFixedSize(FieldType(name))) {
                 offset += @sizeOf(usize);
             }
 
-            return read(std.meta.FieldType(Type, name), self.bytes[offset..]);
+            return read(FieldType(name), self.bytes[offset..]);
         }
     };
 }
@@ -182,7 +200,7 @@ fn readElem(comptime Element: type, len: usize, index: usize, bytes: []const u8)
 
     var offset: usize = undefined;
     if (comptime typeHasFixedSize(Element)) {
-        offset = (@sizeOf(Element) * index);
+        offset = (sizeOf(Element) * index);
     } else {
         var total_skip: usize = 0;
         for (0..index) |i| {
@@ -213,7 +231,7 @@ pub fn write(value: anytype, out: *std.ArrayList(u8)) !void {
 
 fn writeValue(value: anytype, out: *std.ArrayList(u8)) std.mem.Allocator.Error!usize {
     const Type = @TypeOf(value);
-    return switch (@typeInfo(Type)) {
+    const size = switch (@typeInfo(Type)) {
         .Void => 0,
         .Bool, .Int, .Float => try writePacked(value, null, out),
         .Pointer => |info| switch (info.size) {
@@ -231,6 +249,7 @@ fn writeValue(value: anytype, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u
         .Union => try writeUnion(value, out),
         else => @compileError("unsupported type"),
     };
+    return size;
 }
 
 fn writeSlice(comptime Elem: type, value: anytype, len: usize, out: *std.ArrayList(u8)) !usize {
@@ -325,7 +344,13 @@ fn writeValueAdapted(comptime Type: type, comptime Error: type, adapter: anytype
     };
 }
 
-fn writeSliceAdapted(comptime Elem: type, comptime Error: type, adapter: anytype, len: usize, out: *std.ArrayList(u8)) Error!usize {
+fn writeSliceAdapted(
+    comptime Elem: type,
+    comptime Error: type,
+    adapter: anytype,
+    len: usize,
+    out: *std.ArrayList(u8),
+) Error!usize {
     var size: usize = 0;
     if (comptime typeHasFixedSize(Elem)) {
         for (0..len) |i| {
@@ -349,7 +374,12 @@ fn writeSliceAdapted(comptime Elem: type, comptime Error: type, adapter: anytype
     return size;
 }
 
-fn writeStructAdapted(comptime Struct: type, comptime Error: type, adapter: anytype, out: *std.ArrayList(u8)) Error!usize {
+fn writeStructAdapted(
+    comptime Struct: type,
+    comptime Error: type,
+    adapter: anytype,
+    out: *std.ArrayList(u8),
+) Error!usize {
     const info = @typeInfo(Struct).Struct;
 
     var size: usize = 0;
@@ -368,7 +398,12 @@ fn writeStructAdapted(comptime Struct: type, comptime Error: type, adapter: anyt
     return size;
 }
 
-fn writeUnionAdapted(comptime Union: type, comptime Error: type, adapter: anytype, out: *std.ArrayList(u8)) Error!usize {
+fn writeUnionAdapted(
+    comptime Union: type,
+    comptime Error: type,
+    adapter: anytype,
+    out: *std.ArrayList(u8),
+) Error!usize {
     const info = @typeInfo(Union).Union;
     switch (try adapter.tag()) {
         inline else => |tag| {
@@ -396,18 +431,28 @@ fn writePacked(value: anytype, at: ?usize, out: *std.ArrayList(u8)) !usize {
 fn typeHasFixedSize(comptime Type: type) bool {
     return switch (@typeInfo(Type)) {
         .Void, .Bool, .Int, .Float, .Enum => true,
-        // The only pointer type allowed is Slice, and that has a varying size.
-        .Pointer => false,
+        .Optional, .Pointer, .Union => false,
         .Array => |info| comptime typeHasFixedSize(info.child),
         .Struct => |info| for (info.fields) |field| {
             if (!comptime typeHasFixedSize(field.type))
                 break false;
         } else true,
-        .Optional => |info| comptime typeHasFixedSize(info.child),
-        .Union => |info| for (info.fields) |field| {
-            if (!comptime typeHasFixedSize(field.type))
-                break false;
-        } else true,
+        else => @compileError("unsupported"),
+    };
+}
+
+// this function assumes that `typeHasFixedSize(Type) == true`.
+fn sizeOf(comptime Type: type) comptime_int {
+    return switch (@typeInfo(Type)) {
+        .Void, .Bool, .Int, .Float, .Enum => @sizeOf(Type),
+        .Array => |info| info.len * sizeOf(info.child),
+        .Struct => |info| blk: {
+            var size = 0;
+            for (info.fields) |field| {
+                size += sizeOf(field.type);
+            }
+            break :blk size;
+        },
         else => @compileError("unsupported"),
     };
 }
@@ -559,10 +604,10 @@ test "array of slices" {
 test "struct serde" {
     const exp = struct {
         const value: struct {
-            f0: bool = true,
-            f1: u16 = 20,
-            f2: u89 = 30,
-            f3: f32 = 100.9,
+            f0: ?bool = true,
+            f1: ?u16 = 20,
+            f2: ?u89 = 30,
+            f3: ?f32 = 100.9,
         } = .{};
 
         fn check(result: Serde(@TypeOf(value))) !void {
@@ -571,6 +616,26 @@ test "struct serde" {
             try std.testing.expectEqual(value.f1, result.view.field(.f1));
             try std.testing.expectEqual(value.f2, result.view.field(.f2));
             try std.testing.expectEqual(value.f3, result.view.field(.f3));
+        }
+    };
+
+    try exp.check(try serde(exp.value));
+    try exp.check(try serdeAdapted(exp.value));
+}
+
+test "tuple struct serde" {
+    const exp = struct {
+        const value: struct {
+            ?bool,
+            ?u16,
+            ?f32,
+        } = .{ true, 89, 178.8734 };
+
+        fn check(result: Serde(@TypeOf(value))) !void {
+            defer result.deinit();
+            try std.testing.expectEqual(value[0], result.view.field(0));
+            try std.testing.expectEqual(value[1], result.view.field(1));
+            try std.testing.expectEqual(value[2], result.view.field(2));
         }
     };
 

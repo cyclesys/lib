@@ -7,7 +7,7 @@ const idx = @import("index.zig");
 pub fn UpdateObject(comptime ObjectRef: type) type {
     const Object = ObjectRef.def;
     const New = NewObject(Object);
-    const Mutate = void; // MutateObject(Object);
+    const Mutate = MutateObject(Object);
     return @Type(.{
         .Union = .{
             .layout = .Auto,
@@ -60,7 +60,7 @@ pub fn NewType(comptime Type: type) type {
         .Struct => NewStruct(Type),
         .Tuple => NewTuple(Type),
         .Union => NewUnion(Type),
-        .Ref => def.ObjectId,
+        .Ref => u128,
     };
 }
 
@@ -108,7 +108,7 @@ pub fn MutateObject(comptime Object: type) type {
 pub fn MutateType(comptime Type: type) type {
     return switch (def.Type.from(Type).?) {
         .Void, .Bool, .Int, .Float, .Enum, .Ref => NewType(Type),
-        .String => MutateString,
+        .String => void, //MutateString,
         .Optional => MutateOptional(Type),
         .Array => MutateArray(Type),
         .List => MutateList(Type),
@@ -207,7 +207,7 @@ pub fn MutateUnion(comptime Type: type) type {
     return Union(Type, MutateUnionField);
 }
 
-fn MutateUnionField(comptime Type: type) type {
+pub fn MutateUnionField(comptime Type: type) type {
     return union(enum) {
         New: NewType(Type),
         Mutate: MutateType(Type),
@@ -219,7 +219,7 @@ fn ObjectVersions(comptime Object: type, comptime Field: fn (type) type) type {
     var fields: [tag_fields.len]std.builtin.Type.UnionField = undefined;
     for (Object.versions, 0..) |Ver, i| {
         tag_fields[i] = .{
-            .name = "V" ++ meta.numFieldName(i),
+            .name = "v" ++ meta.numFieldName(i),
             .value = i,
         };
 
