@@ -1,7 +1,6 @@
 const win = @import("std").os.windows;
 
 pub usingnamespace win.kernel32;
-pub usingnamespace win.user32;
 
 pub const FARPROC = win.FARPROC;
 pub const HINSTANCE = win.HINSTANCE;

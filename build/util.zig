@@ -5,7 +5,7 @@ pub fn ensureCachedFile(allocator: std.mem.Allocator, cache_root: []const u8, na
     const file = std.fs.openFileAbsolute(path, .{}) catch |e| {
         switch (e) {
             error.FileNotFound => {
-                const result = try std.ChildProcess.exec(.{
+                const result = try std.ChildProcess.run(.{
                     .allocator = allocator,
                     .argv = &.{ "curl", url, "-o", path },
                 });
