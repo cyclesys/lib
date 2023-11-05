@@ -41,6 +41,11 @@ pub fn from(comptime Scheme: type) Self {
         var objects: [Scheme.types.len]Object = undefined;
         for (Scheme.types, 0..) |T, i| {
             objects[i] = Object.from(T);
+            for (objects[0..i]) |prev_obj| {
+                if (std.mem.eql(u8, objects[i].name, prev_obj.name)) {
+                    @compileError("duplicate objects found in object scheme: " ++ Scheme.name);
+                }
+            }
         }
         break :blk Self{
             .name = Scheme.name,
