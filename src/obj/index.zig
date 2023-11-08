@@ -2,16 +2,13 @@ const std = @import("std");
 const def = @import("../lib.zig").def;
 const meta = @import("../meta.zig");
 
-pub const IndexId = struct {
-    scheme: u16,
-    type: u16,
-};
-
-pub fn Index(comptime schemes: anytype) type {
+pub fn Index(comptime scheme_types: anytype) type {
     return struct {
+        pub const schemes = scheme_types;
+
         pub const infos = blk: {
-            var result: [schemes.len]def.ObjectScheme = undefined;
-            for (schemes, 0..) |Scheme, i| {
+            var result: [scheme_types.len]def.ObjectScheme = undefined;
+            for (scheme_types, 0..) |Scheme, i| {
                 result[i] = def.ObjectScheme.from(Scheme);
                 for (result[0..i]) |prev_scheme| {
                     if (std.mem.eql(u8, result[i].name, prev_scheme.name)) {
@@ -22,21 +19,27 @@ pub fn Index(comptime schemes: anytype) type {
             break :blk result;
         };
 
-        pub fn Object(comptime id: IndexId) type {
-            return schemes[id.scheme].types[id.type];
+        pub fn Type(comptime id: def.TypeId) type {
+            return scheme_types[id.scheme].types[id.name].versions[id.version];
         }
 
-        pub fn objectId(comptime ObjectRef: type) IndexId {
-            if (Object.def_kind != .ref or Object.def.def_kind != .object) {
+        pub fn typeId(comptime ObjectRef: type, comptime version: comptime_int) def.TypeId {
+            if (ObjectRef.def_kind != .ref or ObjectRef.def.def_kind != .object) {
                 @compileError("Object must be an object ref type");
             }
-            for (schemes, 0..) |Scheme, i| {
+
+            if (version < 0 or version >= ObjectRef.def.versions.len) {
+                @compileError("Object version number is invalid");
+            }
+
+            for (scheme_types, 0..) |Scheme, i| {
                 if (Scheme == ObjectRef.scheme) {
-                    for (Scheme.refs, 0..) |Ref, ii| {
-                        if (Ref == ObjectRef) {
-                            return IndexId{
+                    for (Scheme.types, 0..) |T, ii| {
+                        if (T == ObjectRef.def) {
+                            return def.TypeId{
                                 .scheme = i,
                                 .type = ii,
+                                .version = version,
                             };
                         }
                     }

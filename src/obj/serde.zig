@@ -67,7 +67,7 @@ pub fn NewType(comptime Type: type) type {
 pub const NewString = []const u8;
 
 pub fn NewOptional(comptime Type: type) type {
-    return Optional(Type, NewType);
+    return ?NewType(std.meta.Child(Type));
 }
 
 pub fn NewArray(comptime Type: type) type {
@@ -108,7 +108,7 @@ pub fn MutateObject(comptime Object: type) type {
 pub fn MutateType(comptime Type: type) type {
     return switch (def.Type.from(Type).?) {
         .Void, .Bool, .Int, .Float, .Enum, .Ref => NewType(Type),
-        .String => void, //MutateString,
+        .String => MutateString,
         .Optional => MutateOptional(Type),
         .Array => MutateArray(Type),
         .List => MutateList(Type),
@@ -139,7 +139,11 @@ pub const MutateStringOp = union(enum) {
 };
 
 pub fn MutateOptional(comptime Type: type) type {
-    return Optional(Type, MutateType);
+    return union(enum) {
+        New: NewType(Type),
+        Mutate: MutateType(Type),
+        Null: void,
+    };
 }
 
 pub fn MutateArray(comptime Type: type) type {
@@ -179,15 +183,16 @@ pub fn MutateMap(comptime Type: type) type {
 
 pub fn MutateMapOp(comptime Type: type) type {
     return union(enum) {
-        Put: struct {
-            key: NewType(Type.key),
-            value: NewType(Type.value),
-        },
+        Put: NewMapEntry(Type),
         Remove: NewType(Type.key),
-        Mutate: struct {
-            key: NewType(Type.key),
-            value: MutateType(Type.value),
-        },
+        Mutate: MutateMapEntry(Type),
+    };
+}
+
+pub fn MutateMapEntry(comptime Type: type) type {
+    return struct {
+        key: NewType(Type.key),
+        value: MutateType(Type.value),
     };
 }
 
@@ -247,101 +252,14 @@ fn ObjectVersions(comptime Object: type, comptime Field: fn (type) type) type {
     });
 }
 
-fn Optional(comptime Type: type, comptime Child: fn (type) type) type {
-    return ?Child(std.meta.Child(Type));
-}
-
 fn Struct(comptime Type: type, comptime Field: fn (type) type) type {
-    const info = @typeInfo(Type).Struct;
-    var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
-    var len = 0;
-    for (info.fields) |field| {
-        if (def.Type.from(field.type) == null) continue;
-
-        const FieldType = Field(field.type);
-        fields[len] = .{
-            .name = field.name,
-            .type = FieldType,
-            .default_value = null,
-            .is_comptime = false,
-            .alignment = @alignOf(FieldType),
-        };
-        len += 1;
-    }
-    return @Type(.{
-        .Struct = .{
-            .layout = .Auto,
-            .backing_integer = null,
-            .fields = fields[0..len],
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = false,
-        },
-    });
+    return meta.RemapStruct(meta.fields(Type), Field);
 }
 
 fn Tuple(comptime Type: type, comptime Field: fn (type) type) type {
-    const info = @typeInfo(Type).Struct;
-    var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
-    var len = 0;
-    for (info.fields) |field| {
-        if (def.Type.from(field.type) == null) continue;
-
-        const FieldType = Field(field.type);
-        fields[len] = .{
-            .name = meta.numFieldName(len),
-            .type = FieldType,
-            .default_value = null,
-            .is_comptime = false,
-            .alignment = @alignOf(FieldType),
-        };
-        len += 1;
-    }
-    return @Type(.{
-        .Struct = .{
-            .layout = .Auto,
-            .backing_integer = null,
-            .fields = fields[0..len],
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = true,
-        },
-    });
+    return meta.RemapTuple(meta.fields(Type), Field);
 }
 
 fn Union(comptime Type: type, comptime Field: fn (type) type) type {
-    const info = @typeInfo(Type).Union;
-    var tag_fields: [info.fields.len]std.builtin.Type.EnumField = undefined;
-    var fields: [info.fields.len]std.builtin.Type.UnionField = undefined;
-    var len = 0;
-    for (info.fields) |field| {
-        if (def.Type.from(field.type) == null) continue;
-
-        tag_fields[len] = .{
-            .name = field.name,
-            .value = len,
-        };
-
-        const FieldType = Field(field.type);
-        fields[len] = .{
-            .name = field.name,
-            .type = FieldType,
-            .alignment = @alignOf(FieldType),
-        };
-
-        len += 1;
-    }
-    return @Type(.{
-        .Union = .{
-            .layout = .Auto,
-            .tag_type = @Type(.{
-                .Enum = .{
-                    .tag_type = std.math.IntFittingRange(0, len - 1),
-                    .fields = tag_fields[0..len],
-                    .decls = &[_]std.builtin.Type.Declaration{},
-                    .is_exhaustive = true,
-                },
-            }),
-            .fields = fields[0..len],
-            .decls = &[_]std.builtin.Type.Declaration{},
-        },
-    });
+    return meta.RemapUnion(meta.fields(Type), Field);
 }

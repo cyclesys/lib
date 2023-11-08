@@ -838,29 +838,7 @@ fn WriteStruct(
         allocator: Allocator,
         fields: Fields,
 
-        pub const Fields = blk: {
-            const info = @typeInfo(Type).Struct;
-            var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
-            for (info.fields, 0..) |f, i| {
-                const FT = ?WriteType(f.type);
-                fields[i] = .{
-                    .name = f.name,
-                    .type = FT,
-                    .default_value = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(FT),
-                };
-            }
-            break :blk @Type(.{
-                .Struct = .{
-                    .layout = .Auto,
-                    .backing_integer = null,
-                    .fields = &fields,
-                    .decls = &[_]std.builtin.Type.Declaration{},
-                    .is_tuple = false,
-                },
-            });
-        };
+        pub const Fields = meta.RemapStruct(meta.fields(Type), structFieldRemapper(WriteType));
 
         pub fn FieldType(comptime name: std.meta.FieldEnum(Fields)) type {
             const OptType = std.meta.FieldType(Fields, name);
@@ -911,29 +889,7 @@ fn WriteTuple(
         allocator: Allocator,
         fields: Fields,
 
-        pub const Fields = blk: {
-            const info = @typeInfo(Type).Struct;
-            var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
-            for (info.fields, 0..) |f, i| {
-                const FT = ?WriteType(f.type);
-                fields[i] = .{
-                    .name = meta.numFieldName(i),
-                    .type = FT,
-                    .default_value = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(FT),
-                };
-            }
-            break :blk @Type(.{
-                .Struct = .{
-                    .layout = .Auto,
-                    .backing_integer = null,
-                    .fields = &fields,
-                    .decls = &[_]std.builtin.Type.Declaration{},
-                    .is_tuple = true,
-                },
-            });
-        };
+        pub const Fields = meta.RemapTuple(meta.fields(Type), structFieldRemapper(WriteType));
 
         pub fn FieldType(comptime index: comptime_int) type {
             const OptType = std.meta.fields(Fields)[index].type;
@@ -984,39 +940,7 @@ fn WriteUnion(
         allocator: Allocator,
         active: ?Fields,
 
-        pub const Fields = blk: {
-            const info = @typeInfo(Type).Union;
-            var tag_fields: [info.fields.len]std.builtin.Type.EnumField = undefined;
-            var fields: [info.fields.len]std.builtin.Type.UnionField = undefined;
-            for (info.fields, 0..) |f, i| {
-                tag_fields[i] = .{
-                    .name = f.name,
-                    .value = i,
-                };
-
-                const FT = WriteType(f.type);
-                fields[i] = .{
-                    .name = f.name,
-                    .type = FT,
-                    .alignment = @alignOf(FT),
-                };
-            }
-            break :blk @Type(.{
-                .Union = .{
-                    .layout = .Auto,
-                    .tag_type = @Type(.{
-                        .Enum = .{
-                            .tag_type = std.math.IntFittingRange(0, tag_fields.len - 1),
-                            .fields = &tag_fields,
-                            .decls = &[_]std.builtin.Type.Declaration{},
-                            .is_exhaustive = true,
-                        },
-                    }),
-                    .fields = &fields,
-                    .decls = &[_]std.builtin.Type.Declaration{},
-                },
-            });
-        };
+        pub const Fields = meta.RemapUnion(meta.fields(Type), WriteType);
 
         pub fn FieldType(comptime name: std.meta.FieldEnum(Fields)) type {
             return std.meta.FieldType(Fields, name);
@@ -1066,6 +990,14 @@ fn WriteUnion(
     };
 }
 
+fn structFieldRemapper(comptime WriteType: fn (type) type) (fn (type) type) {
+    return struct {
+        fn Remap(comptime T: type) type {
+            return ?WriteType(T);
+        }
+    }.Remap;
+}
+
 fn objectAllocates(comptime Object: type, comptime typeAllocates: fn (type) bool) bool {
     return for (Object.versions) |Ver| {
         if (comptime typeAllocates(Ver)) break true;
@@ -1081,11 +1013,8 @@ fn newTypeAllocates(comptime Type: type) bool {
         .Void, .Bool, .Int, .Float, .Enum, .Ref => false,
         .String, .List, .Map => true,
         .Optional => comptime newTypeAllocates(std.meta.Child(Type)),
-        .Array => comptime newTypeAllocates(std.meta.Child(Type)),
-        .Struct, .Tuple => for (std.meta.fields(Type)) |field| {
-            if (comptime newTypeAllocates(field.type)) break true;
-        } else false,
-        .Union => for (std.meta.fields(Type)) |field| {
+        .Array => comptime newTypeAllocates(Type.child),
+        .Struct, .Tuple, .Union => for (meta.fields(Type)) |field| {
             if (comptime newTypeAllocates(field.type)) break true;
         } else false,
     };
@@ -1096,10 +1025,7 @@ fn mutateTypeAllocates(comptime Type: type) bool {
         .Void, .Bool, .Int, .Float, .Enum, .Ref => false,
         .String, .Array, .List, .Map => true,
         .Optional => comptime mutateTypeAllocates(std.meta.Child(Type)),
-        .Struct, .Tuple => for (std.meta.fields(Type)) |field| {
-            if (comptime mutateTypeAllocates(field.type)) break true;
-        } else false,
-        .Union => for (std.meta.fields(Type)) |field| {
+        .Struct, .Tuple, .Union => for (meta.fields(Type)) |field| {
             if (comptime mutateTypeAllocates(field.type)) break true;
         } else false,
     };
@@ -1183,7 +1109,7 @@ fn deinitNewType(allocator: std.mem.Allocator, comptime Type: type, value: *Writ
             value.entries.deinit();
         },
         .Struct, .Tuple => {
-            inline for (std.meta.fields(Type)) |field| {
+            inline for (meta.fields(Type)) |field| {
                 if (comptime newTypeAllocates(field.type)) {
                     if (@field(value, field.name)) |*val| {
                         deinitNewType(allocator, field.type, val);
@@ -1195,9 +1121,10 @@ fn deinitNewType(allocator: std.mem.Allocator, comptime Type: type, value: *Writ
             if (value.active) |*active| {
                 switch (active) {
                     inline else => |*val, tag| {
-                        const field_type = std.meta.fields(Type)[@intFromEnum(tag)].type;
-                        if (comptime newTypeAllocates(field_type)) {
-                            deinitNewType(allocator, field_type, val);
+                        const field = meta.fields(Type)[@intFromEnum(tag)];
+
+                        if (comptime newTypeAllocates(field.type)) {
+                            deinitNewType(allocator, field.type, val);
                         }
                     },
                 }
@@ -1309,7 +1236,7 @@ fn deinitMutateType(allocator: std.mem.Allocator, comptime Type: type, value: *W
             value.elems.deinit();
         },
         .Struct, .Tuple => {
-            inline for (std.meta.fields(Type)) |field| {
+            inline for (meta.fields(Type)) |field| {
                 if (comptime mutateTypeAllocates(field.type)) {
                     if (@field(value, field.name)) |*val| {
                         deinitMutateType(allocator, field.type, val);
@@ -1321,9 +1248,9 @@ fn deinitMutateType(allocator: std.mem.Allocator, comptime Type: type, value: *W
             if (value.active) |*active| {
                 switch (active) {
                     inline else => |*val, tag| {
-                        const field_type = std.meta.fields(Type)[@intFromEnum(tag)].type;
-                        if (comptime mutateTypeAllocates(field_type)) {
-                            deinitMutateType(allocator, field_type, val);
+                        const field = meta.fields(Type)[@intFromEnum(tag)];
+                        if (comptime mutateTypeAllocates(field.type)) {
+                            deinitMutateType(allocator, field.type, val);
                         }
                     },
                 }
@@ -1686,30 +1613,21 @@ fn StructAdapter(
         }
 
         pub fn field(self: Self, comptime index: comptime_int) !FieldAdapterAt(index) {
+            const f = meta.fields(Fields)[index];
             return if (allow_null)
-                return FieldAdapterAt(index).init(&@field(self.val.fields, fieldInfo(index).name))
-            else if (@field(self.val.fields, fieldInfo(index).name)) |*val|
+                FieldAdapterAt(index).init(&@field(self.val.fields, f.name))
+            else if (@field(self.val.fields, f.name)) |*val|
                 FieldAdapterAt(index).init(val)
             else
                 error.StructFieldNotSet;
         }
 
-        fn fieldInfo(comptime index: comptime_int) std.builtin.Type.StructField {
-            var i = 0;
-            for (std.meta.fields(Fields)) |f| {
-                if (def.Type.from(f.type) == null) continue;
-                if (i == index) return f;
-                i += 1;
-            }
-            @compileError("struct field index is invalid");
-        }
-
         fn FieldAdapterAt(comptime index: comptime_int) type {
-            const info = fieldInfo(index);
+            const f = meta.fields(Fields)[index];
             return if (allow_null)
-                NullableStructFieldAdapter(FieldValue(info.type), FieldAdapter(info.type))
+                NullableStructFieldAdapter(FieldValue(f.type), FieldAdapter(f.type))
             else
-                FieldAdapter(info.type);
+                FieldAdapter(f.type);
         }
     };
 }
@@ -1740,18 +1658,11 @@ fn TupleAdapter(
         }
 
         fn FieldAdapterAt(comptime index: comptime_int) type {
-            var i = 0;
-            for (std.meta.fields(Fields)) |f| {
-                if (def.Type.from(f.type) == null) continue;
-                if (i == index) {
-                    return if (allow_null)
-                        NullableStructFieldAdapter(FieldValue(f.type), FieldAdapter(f.type))
-                    else
-                        return FieldAdapter(f.type);
-                }
-                i += 1;
-            }
-            @compileError("tuple field index is invalid");
+            const f = meta.fields(Fields)[index];
+            return if (allow_null)
+                NullableStructFieldAdapter(FieldValue(f.type), FieldAdapter(f.type))
+            else
+                return FieldAdapter(f.type);
         }
     };
 }
@@ -1804,24 +1715,9 @@ fn UnionAdapter(
             return error.UnionValueNotSet;
         }
 
-        fn fieldInfo(comptime t: Tag) std.builtin.Type.UnionField {
-            comptime {
-                const info = @typeInfo(Fields).Union;
-                var i = 0;
-                for (info.fields) |f| {
-                    if (def.Type.from(f.type) == null) continue;
-                    if (@intFromEnum(t) == i) {
-                        return f;
-                    }
-                    i += 1;
-                }
-                @compileError("union field tag is invalid");
-            }
-        }
-
         fn FieldAdapterTag(comptime t: Tag) type {
-            const info = fieldInfo(t);
-            return FieldAdapter(info.type);
+            const f = meta.fields(Fields)[@intFromEnum(t)];
+            return FieldAdapter(f.type);
         }
     };
 }
@@ -1872,12 +1768,13 @@ fn DirectStructAdapter(comptime Type: type, comptime FieldAdapter: fn (type) typ
         }
 
         pub fn field(self: Self, comptime index: comptime_int) !FieldAdapterAt(index) {
-            const field_name = std.meta.fields(Type)[index].name;
-            return FieldAdapterAt(index).init(@field(self.val, field_name));
+            const f = meta.fields(Type)[index];
+            return FieldAdapterAt(index).init(@field(self.val, f.name));
         }
 
         fn FieldAdapterAt(comptime index: comptime_int) type {
-            return FieldAdapter(std.meta.fields(Type)[index].type);
+            const f = meta.fields(Type)[index];
+            return FieldAdapter(f.type);
         }
     };
 }
@@ -1898,12 +1795,13 @@ fn DirectUnionAdapter(comptime Type: type, comptime FieldAdapter: fn (type) type
         }
 
         pub fn value(self: Self, comptime t: Tag) !FieldAdapterTag(t) {
-            const field_name = std.meta.fields(Type)[@intFromEnum(t)].name;
-            return FieldAdapterTag(t).init(@field(self.val, field_name));
+            const f = meta.fields(Type)[@intFromEnum(t)];
+            return FieldAdapterTag(t).init(@field(self.val, f.name));
         }
 
         fn FieldAdapterTag(comptime t: Tag) type {
-            return FieldAdapter(std.meta.fields(Type)[@intFromEnum(t)].type);
+            const f = meta.fields(Type)[@intFromEnum(t)];
+            return FieldAdapter(f.type);
         }
     };
 }
