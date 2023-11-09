@@ -10,8 +10,8 @@
     },
     .dependencies = .{
         .mach_freetype = .{
-            .url = "https://github.com/dcov/mach-freetype/archive/7c780c199cd0a38f6e073dd9aad8998134ae4ea7.tar.gz",
-            .hash = "122036cbb2376e3e152c087a80aa3f911dd87f04602ee6a186f6454a6b7e2a9b92a4",
+            .url = "https://pkg.machengine.org/mach-glfw/a6d971285dfe731e49f82e81c81da2b7f5c6a442.tar.gz",
+            .hash = "1220e0de43cacb583b8f9efddcbe359398cfca17a39e265b56c8f2a10314eb8f7a5f",
         },
         .vulkan_zig = .{
             .url = "https://github.com/Snektron/vulkan-zig/archive/348ac5d35a859abd6e3db8b4190c75a417c1894b.tar.gz",
