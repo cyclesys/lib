@@ -121,7 +121,7 @@ pub fn RemapStruct(comptime in_fields: []const std.builtin.Type.StructField, com
     });
 }
 
-pub fn RemapTuple(comptime in_fields: []const std.builtin.Type.Structfield, comptime Remap: fn (comptime type) type) type {
+pub fn RemapTuple(comptime in_fields: []const std.builtin.Type.StructField, comptime Remap: fn (comptime type) type) type {
     var out_fields: [in_fields.len]std.builtin.Type.StructField = undefined;
     for (in_fields, 0..) |f, i| {
         const FieldType = Remap(f.type);

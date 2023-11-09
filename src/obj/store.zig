@@ -438,7 +438,7 @@ fn updateValue(
                     }
                     try updateValue(allocator, std.meta.Child(Type), view.value(.Mutate), &out.*.?);
                 },
-                .Null => {
+                .None => {
                     if (out.* == null) {
                         return error.InvalidOptionalOp;
                     }

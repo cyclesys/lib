@@ -142,7 +142,7 @@ pub fn MutateOptional(comptime Type: type) type {
     return union(enum) {
         New: NewType(Type),
         Mutate: MutateType(Type),
-        Null: void,
+        None: void,
     };
 }
 

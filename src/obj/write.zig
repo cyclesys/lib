@@ -114,7 +114,55 @@ const WriteNewString = struct {
 };
 
 fn WriteNewOptional(comptime Type: type) type {
-    return WriteOptional(Type, WriteNewType, newTypeAllocates, deinitNewType);
+    return struct {
+        allocator: Allocator,
+        opt: ?Option,
+
+        pub const Option = union(enum) {
+            Some: Some,
+            None,
+        };
+        pub const Some = WriteNewType(Child);
+        const Allocator = if (newTypeAllocates(Child)) std.mem.Allocator else void;
+        const Child = std.meta.Child(Type);
+        const Self = @This();
+
+        pub fn init(allocator: Allocator) Self {
+            return Self{
+                .allocator = allocator,
+                .active = null,
+            };
+        }
+
+        pub fn some(self: *Self) *Some {
+            if (self.opt == null or self.opt.? == .None) {
+                if (comptime typeTakesAllocator(Child)) {
+                    if (comptime newTypeAllocates(Child)) {
+                        self.opt = Option{ .Some = Some.init(self.allocator) };
+                    } else {
+                        self.opt = Option{ .Some = Some.init(undefined) };
+                    }
+                } else {
+                    self.opt = Option{ .Some = Some.init() };
+                }
+            }
+            return &self.opt.?.Some;
+        }
+
+        pub fn none(self: *Self) void {
+            if (self.opt) |*opt| {
+                switch (opt.*) {
+                    .Some => |*val| {
+                        if (comptime newTypeAllocates(Child)) {
+                            deinitNewType(self.allocator, Child, val);
+                        }
+                    },
+                    .None => {},
+                }
+            }
+            self.opt = .None;
+        }
+    };
 }
 
 fn WriteNewArray(comptime Type: type) type {
@@ -338,7 +386,99 @@ const WriteMutateString = struct {
 };
 
 fn WriteMutateOptional(comptime Type: type) type {
-    return WriteOptional(Type, WriteMutateType, mutateTypeAllocates, deinitMutateType);
+    return struct {
+        allocator: Allocator,
+        opt: ?Active,
+
+        const Active = union(enum) {
+            New: New,
+            Mutate: Mutate,
+            None: void,
+        };
+        pub const New = WriteNewType(Child);
+        pub const Mutate = WriteMutateType(Child);
+        const Child = std.meta.Child(Type);
+        const Allocator = if (newTypeAllocates(Child) or mutateTypeAllocates(Child)) std.mem.Allocator else void;
+        const Self = @This();
+
+        pub fn init(allocator: Allocator) Self {
+            return Self{
+                .allocator = allocator,
+                .active = null,
+            };
+        }
+
+        pub fn new(self: *Self) *New {
+            if (self.opt) |*opt| {
+                switch (opt.*) {
+                    .New => |*val| return val,
+                    .Mutate => |*val| {
+                        if (comptime mutateTypeAllocates(Child)) {
+                            deinitMutateType(self.allocator, Child, val);
+                        }
+                    },
+                    .None => {},
+                }
+            }
+
+            if (comptime typeTakesAllocator(Child)) {
+                if (comptime newTypeAllocates(Child)) {
+                    self.opt = Active{ .New = New.init(self.allocator) };
+                } else {
+                    self.opt = Active{ .New = New.init(undefined) };
+                }
+            } else {
+                self.opt = Active{ .New = New.init() };
+            }
+
+            return &self.opt.?.New;
+        }
+
+        pub fn mutate(self: *Self) *Mutate {
+            if (self.opt) |*opt| {
+                switch (opt.*) {
+                    .New => |*val| {
+                        if (comptime newTypeAllocates(Child)) {
+                            deinitNewType(self.allocator, Child, val);
+                        }
+                    },
+                    .Mutate => |*val| return val,
+                    .None => {},
+                }
+            }
+
+            if (comptime typeTakesAllocator(Child)) {
+                if (comptime mutateTypeAllocates(Child)) {
+                    self.opt = Active{ .Mutate = Mutate.init(self.allocator) };
+                } else {
+                    self.opt = Active{ .Mutate = Mutate.init(undefined) };
+                }
+            } else {
+                self.opt = Active{ .Mutate = Mutate.init() };
+            }
+
+            return &self.opt.?.Mutate;
+        }
+
+        pub fn none(self: *Self) void {
+            if (self.opt) |*opt| {
+                switch (opt.*) {
+                    .New => |*val| {
+                        if (comptime newTypeAllocates(Child)) {
+                            deinitNewType(self.allocator, Child, val);
+                        }
+                    },
+                    .Mutate => |*val| {
+                        if (comptime mutateTypeAllocates(Child)) {
+                            deinitMutateType(self.allocator, Child, val);
+                        }
+                    },
+                    .None => {},
+                }
+            }
+            self.opt = .None;
+        }
+    };
 }
 
 fn WriteMutateArray(comptime Type: type) type {
@@ -769,62 +909,6 @@ fn WriteValue(comptime Type: type) type {
 
         pub fn set(self: *Self, value: Type) void {
             self.value = value;
-        }
-    };
-}
-
-fn WriteOptional(
-    comptime Type: type,
-    comptime WriteType: fn (type) type,
-    comptime typeAllocates: fn (type) bool,
-    comptime deinitChild: anytype,
-) type {
-    return struct {
-        allocator: Allocator,
-        opt: ?Option,
-
-        pub const Option = union(enum) {
-            Some: WriteNewType(Child),
-            None,
-        };
-        pub const FieldType = WriteType(Child);
-        const Allocator = if (typeAllocates(Child)) std.mem.Allocator else void;
-        const Child = std.meta.Child(Type);
-        const Self = @This();
-
-        pub fn init(allocator: Allocator) Self {
-            return Self{
-                .allocator = allocator,
-                .opt = .None,
-            };
-        }
-
-        pub fn some(self: *Self) *FieldType {
-            if (self.opt == null or self.opt.? == .None) {
-                if (comptime typeTakesAllocator(Child)) {
-                    if (comptime typeAllocates(Child)) {
-                        self.opt = Option{ .Some = FieldType.init(self.allocator) };
-                    } else {
-                        self.opt = Option{ .Some = FieldType.init(undefined) };
-                    }
-                } else {
-                    self.opt = Option{ .Some = FieldType.init() };
-                }
-            }
-            return &self.opt.?.Some;
-        }
-
-        pub fn none(self: *Self) void {
-            if (self.opt) |*opt| {
-                switch (opt.*) {
-                    .Some => |*val| {
-                        if (comptime typeAllocates(Child)) {
-                            deinitChild(self.allocator, Child, val);
-                        }
-                    },
-                    .None => {},
-                }
-            }
         }
     };
 }
@@ -1342,7 +1426,27 @@ fn NewValueAdapter(comptime Type: type) type {
 }
 
 fn NewOptionalAdapter(comptime Type: type) type {
-    return OptionalAdapter(WriteNewOptional(Type), NewTypeAdapter(std.meta.Child(Type)));
+    return struct {
+        val: *const Value,
+
+        const Value = WriteNewOptional(Type);
+        const ChildAdapter = NewTypeAdapter(std.meta.Child(Type));
+        const Self = @This();
+
+        pub fn init(val: *const Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn value(self: Self) !?ChildAdapter {
+            if (self.val.opt) |*opt| {
+                return switch (opt.*) {
+                    .Some => |*val| ChildAdapter.init(val),
+                    .None => null,
+                };
+            }
+            return error.OptionalValueNotSet;
+        }
+    };
 }
 
 fn NewArrayAdapter(comptime Type: type) type {
@@ -1437,7 +1541,39 @@ fn MutateStringOpAdapter(comptime T: type) type {
 }
 
 fn MutateOptionalAdapter(comptime Type: type) type {
-    return OptionalAdapter(WriteMutateOptional(Type), MutateTypeAdapter(std.meta.Child(Type)));
+    return struct {
+        val: *const Value,
+
+        const Value = WriteMutateOptional(Type);
+        const Tag = std.meta.Tag(serde.MutateOptional(Type));
+        const Self = @This();
+
+        pub fn init(val: *const Value) Self {
+            return Self{ .val = val };
+        }
+
+        pub fn tag(self: Self) !Tag {
+            if (self.val.opt) |*opt| {
+                return @enumFromInt(@intFromEnum(opt.*));
+            }
+            return error.OptionalValueNotSet;
+        }
+
+        pub fn value(self: Self, comptime t: Tag) !FieldAdapter(t) {
+            if (self.val.opt) |*opt| {
+                return FieldAdapter(t).init(&@field(opt, @tagName(t)));
+            }
+            return error.OptionalValueNotSet;
+        }
+
+        fn FieldAdapter(comptime t: Tag) type {
+            return switch (t) {
+                .New => NewTypeAdapter(Type),
+                .Mutate => MutateTypeAdapter(Type),
+                .None => ValueAdapter(void),
+            };
+        }
+    };
 }
 
 fn MutateArrayAdapter(comptime Type: type) type {
@@ -1552,28 +1688,6 @@ fn ObjectAdapter(
         Fields,
         VersionAdapter,
     );
-}
-
-fn OptionalAdapter(comptime Value: type, comptime ChildAdapter: type) type {
-    return struct {
-        val: *const Value,
-
-        const Self = @This();
-
-        pub fn init(val: *const Value) Self {
-            return Self{ .val = val };
-        }
-
-        pub fn value(self: Self) !?ChildAdapter {
-            if (self.val.opt) |*opt| {
-                return switch (opt.*) {
-                    .Some => |*val| ChildAdapter.init(val),
-                    .None => null,
-                };
-            }
-            return error.OptionalValueNotSet;
-        }
-    };
 }
 
 fn SliceAdapter(comptime Value: type, comptime ElemAdapter: type) type {
@@ -1998,7 +2112,7 @@ test "write ref" {
 //    }
 //}
 
-test "write optional bool" {
+test "write new optional bool" {
     var writer = TestWriter.init();
     defer writer.deinit();
 
@@ -2014,12 +2128,17 @@ test "write optional bool" {
         try std.testing.expect(obj_view.tag() == .v6);
         try std.testing.expect(obj_view.value(.v6) == true);
     }
+}
+
+test "write mutate optional bool" {
+    var writer = TestWriter.init();
+    defer writer.deinit();
 
     writer.obj.mutate()
         .version(6)
         .none();
 
-    view = try writer.view();
+    var view = try writer.view();
     try std.testing.expect(view.tag() == .Mutate);
     {
         var obj_view = view.value(.Mutate);
