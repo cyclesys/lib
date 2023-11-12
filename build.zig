@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) !void {
     const shaders_module = vulkan.shadersModule(b);
     const known_folders_module = b.dependency("known_folders", .{}).module("known-folders");
 
-    const lib_module = b.addModule("cycle_lib", std.Build.CreateModuleOptions{
+    const lib_module = b.addModule("cycle", std.Build.CreateModuleOptions{
         .source_file = std.Build.LazyPath{ .path = "src/lib.zig" },
         .dependencies = &[_]std.Build.ModuleDependency{
             std.Build.ModuleDependency{
