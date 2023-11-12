@@ -65,11 +65,11 @@ pub fn Store(comptime Index: type) type {
             self.* = undefined;
         }
 
-        pub fn new(self: *Self, id: def.ObjectId, bytes: []const u8) !void {
-            try self.withVersionSlot(id, bytes, newVersion);
+        pub fn add(self: *Self, id: def.ObjectId, bytes: []const u8) !void {
+            try self.withVersionSlot(id, bytes, addVersion);
         }
 
-        fn newVersion(
+        fn addVersion(
             self: *Self,
             comptime Version: type,
             slot: anytype,
@@ -103,9 +103,29 @@ pub fn Store(comptime Index: type) type {
             }
         }
 
+        pub fn remove(self: *Self, id_bits: u128) Error!void {
+            const id: def.ObjectId = @bitCast(id_bits);
+            try self.withVersionSlot(id, @as(void, undefined), removeVersion);
+        }
+
+        fn removeVersion(
+            self: *Self,
+            comptime Version: type,
+            slot: anytype,
+            id: def.ObjectId,
+            _: void,
+        ) Error!void {
+            if (slot.getPtr(@bitCast(id.source))) |ptr| {
+                try deinitValue(self.allocator, Version, .val, ptr);
+                _ = slot.remove(@bitCast(id.source));
+            } else {
+                return error.ObjectNotFound;
+            }
+        }
+
         fn withVersionSlot(
             self: *Self,
-            id: *def.ObjectId,
+            id: def.ObjectId,
             args: anytype,
             f: fn (*Self, comptime type, anytype, id: def.ObjectId, @TypeOf(args)) Error!void,
         ) Error!void {
