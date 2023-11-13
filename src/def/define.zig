@@ -11,6 +11,7 @@ const DefKind = enum {
     list,
     map,
     string,
+    any,
     ignore,
 };
 
@@ -108,14 +109,6 @@ pub fn This(comptime type_name: []const u8) type {
     };
 }
 
-pub fn Array(comptime length: comptime_int, comptime Child: type) type {
-    return struct {
-        pub const def_kind = DefKind.array;
-        pub const len = length;
-        pub const child = Child;
-    };
-}
-
 pub fn List(comptime Child: type) type {
     return struct {
         pub const def_kind = DefKind.list;
@@ -133,6 +126,10 @@ pub fn Map(comptime Key: type, comptime Value: type) type {
 
 pub const String = struct {
     pub const def_kind = DefKind.string;
+};
+
+pub const Any = struct {
+    pub const def_kind = DefKind.any;
 };
 
 pub const Ignore = struct {
@@ -173,7 +170,6 @@ fn checkField(
         .Type => @compileError("field cannot be type."),
         .NoReturn => @compileError("field cannot be noreturn"),
         .Pointer => @compileError("field cannot be pointer"),
-        .Array => @compileError("field cannot be native array, use `Array` type instead."),
         .ComptimeFloat => @compileError("field cannot be comptime_float"),
         .ComptimeInt => @compileError("field cannot be comptime_int"),
         .Undefined => @compileError("field cannot be undefined"),
@@ -190,6 +186,9 @@ fn checkField(
             // these types are valid
         },
         .Optional => |info| {
+            checkField(info.child, scheme_types, false);
+        },
+        .Array => |info| {
             checkField(info.child, scheme_types, false);
         },
         .Struct => |info| {
@@ -215,9 +214,6 @@ fn checkField(
                     .ref => {
                         checkRef(Field);
                     },
-                    .array => {
-                        checkField(Field.child, scheme_types, false);
-                    },
                     .list => {
                         checkField(Field.child, scheme_types, false);
                     },
@@ -225,12 +221,12 @@ fn checkField(
                         checkField(Field.key, scheme_types, false);
                         checkField(Field.value, scheme_types, false);
                     },
-                    .string => {
+                    .string, .any => {
                         // valid
                     },
                     .ignore => {
                         if (!allow_ignore) {
-                            @compileError("field cannot be `Ignore` type");
+                            @compileError("field cannot be `Ignore` type here");
                         }
                     },
                 }

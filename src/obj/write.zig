@@ -168,27 +168,29 @@ fn WriteNewOptional(comptime Type: type) type {
 fn WriteNewArray(comptime Type: type) type {
     return struct {
         allocator: Allocator,
-        elems: [Type.len]?Element,
+        elems: [len]?Element,
 
-        pub const Element = WriteNewType(Type.child);
-        const Allocator = if (newTypeAllocates(Type.child)) std.mem.Allocator else void;
+        pub const Element = WriteNewType(Child);
+        const Child = std.meta.Child(Type);
+        const len = @typeInfo(Type).Array.len;
+        const Allocator = if (newTypeAllocates(Child)) std.mem.Allocator else void;
         const Self = @This();
 
         pub fn init(allocator: Allocator) Self {
             return Self{
                 .allocator = allocator,
-                .elems = [_]?Element{null} ** Type.len,
+                .elems = [_]?Element{null} ** len,
             };
         }
 
         pub fn elem(self: *Self, index: u64) *Element {
-            if (index >= Type.len) {
+            if (index >= len) {
                 @panic("index out of bounds");
             }
 
             if (self.elems[index] == null) {
-                if (comptime typeTakesAllocator(Type.child)) {
-                    if (comptime newTypeAllocates(Type.child)) {
+                if (comptime typeTakesAllocator(Child)) {
+                    if (comptime newTypeAllocates(Child)) {
                         self.elems[index] = Element.init(self.allocator);
                     } else {
                         self.elems[index] = Element.init(undefined);
@@ -489,7 +491,9 @@ fn WriteMutateArray(comptime Type: type) type {
             index: u64,
             elem: Element,
         };
-        pub const Element = WriteMutateType(Type.child);
+        pub const Element = WriteMutateType(Child);
+        const Child = std.meta.Child(Type);
+        const len = @typeInfo(Type).Array.len;
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -497,14 +501,14 @@ fn WriteMutateArray(comptime Type: type) type {
         }
 
         pub fn elem(self: *Self, index: u64) *Element {
-            if (index >= Type.len) {
+            if (index >= len) {
                 @panic("index out of bounds");
             }
 
             const gop = try self.elems.getOrPut(index);
             if (!gop.found_existing) {
-                if (comptime typeTakesAllocator(Type.child)) {
-                    if (comptime mutateTypeAllocates(Type.child)) {
+                if (comptime typeTakesAllocator(Child)) {
+                    if (comptime mutateTypeAllocates(Child)) {
                         gop.value_ptr.* = Op{
                             .index = index,
                             .elem = Element.init(self.elems.allocator),
@@ -1096,8 +1100,7 @@ fn newTypeAllocates(comptime Type: type) bool {
     return switch (def.Type.from(Type).?) {
         .Void, .Bool, .Int, .Float, .Enum, .Ref => false,
         .String, .List, .Map => true,
-        .Optional => comptime newTypeAllocates(std.meta.Child(Type)),
-        .Array => comptime newTypeAllocates(Type.child),
+        .Optional, .Array => comptime newTypeAllocates(std.meta.Child(Type)),
         .Struct, .Tuple, .Union => for (meta.fields(Type)) |field| {
             if (comptime newTypeAllocates(field.type)) break true;
         } else false,
@@ -1170,10 +1173,9 @@ fn deinitNewType(allocator: std.mem.Allocator, comptime Type: type, value: *Writ
             }
         },
         .List => {
-            const Child = std.meta.Child(Type);
-            if (comptime newTypeAllocates(Child)) {
+            if (comptime newTypeAllocates(Type.child)) {
                 for (value.elems.items) |*elem| {
-                    deinitNewType(allocator, Child, elem);
+                    deinitNewType(allocator, Type.child, elem);
                 }
             }
             value.elems.deinit();
@@ -1263,9 +1265,10 @@ fn deinitMutateType(allocator: std.mem.Allocator, comptime Type: type, value: *W
             }
         },
         .Array => {
-            if (comptime mutateTypeAllocates(Type.child)) {
+            const Child = std.meta.Child(Type);
+            if (comptime mutateTypeAllocates(Child)) {
                 for (value.elems.items) |*op| {
-                    deinitMutateType(allocator, Type.child, &op.elem);
+                    deinitMutateType(allocator, Child, &op.elem);
                 }
             }
             value.elems.deinit();
@@ -1453,8 +1456,9 @@ fn NewArrayAdapter(comptime Type: type) type {
     return struct {
         val: *const Value,
 
-        const ElemAdapter = NewTypeAdapter(Type.child);
+        const ElemAdapter = NewTypeAdapter(Child);
         const Value = WriteNewArray(Type);
+        const Child = std.meta.Child(Type);
         const Self = @This();
 
         pub fn init(val: *const Value) Self {
@@ -1577,10 +1581,11 @@ fn MutateOptionalAdapter(comptime Type: type) type {
 }
 
 fn MutateArrayAdapter(comptime Type: type) type {
+    const Child = std.meta.Child(Type);
     const Value = WriteMutateArray(Type);
     const OpFieldAdapter = struct {
         fn FieldAdapter(comptime T: type) type {
-            return if (T == Value.Element) MutateTypeAdapter(Type.child) else DirectValueAdapter(T);
+            return if (T == Value.Element) MutateTypeAdapter(Child) else DirectValueAdapter(T);
         }
     }.FieldAdapter;
     return SliceAdapter(Value, DirectStructAdapter(Value.Op, OpFieldAdapter));
@@ -2318,7 +2323,7 @@ const TestObj = def.Scheme("scheme", .{
         def.This("Obj"),
         //def.String,
         ?bool,
-        //def.Array(2, u32),
+        //[2]u32,
         //def.List(u32),
         //def.Map(u32, u32),
         struct {

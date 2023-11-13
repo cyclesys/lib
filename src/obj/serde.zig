@@ -71,7 +71,8 @@ pub fn NewOptional(comptime Type: type) type {
 }
 
 pub fn NewArray(comptime Type: type) type {
-    return [Type.len]NewType(Type.child);
+    const info = @typeInfo(Type);
+    return [info.len]NewType(info.child);
 }
 
 pub fn NewList(comptime Type: type) type {
@@ -153,7 +154,7 @@ pub fn MutateArray(comptime Type: type) type {
 pub fn MutateArrayOp(comptime Type: type) type {
     return struct {
         index: u64,
-        elem: MutateType(Type.child),
+        elem: MutateType(std.meta.Child(Type)),
     };
 }
 

@@ -16,6 +16,7 @@ pub const Type = union(enum) {
     Union: Union,
     Enum: Enum,
     Ref: Ref,
+    Any: void,
 
     pub const Int = struct {
         signedness: Signedness,
@@ -131,14 +132,16 @@ pub const Type = union(enum) {
                     },
                 };
             },
-            .Struct => |info| if (@hasDecl(T, "def_kind")) switch (T.def_kind) {
-                .this => Type{
-                    .Ref = Ref{
-                        .Internal = Ref.Internal{
-                            .name = T.name,
-                        },
+            .Array => |info| comptime blk: {
+                const child = Type.from(info.child).?;
+                break :blk Type{
+                    .Array = Array{
+                        .len = info.len,
+                        .child = &child,
                     },
-                },
+                };
+            },
+            .Struct => |info| if (@hasDecl(T, "def_kind")) switch (T.def_kind) {
                 .ref => Type{
                     .Ref = Ref{
                         .External = Ref.External{
@@ -147,14 +150,12 @@ pub const Type = union(enum) {
                         },
                     },
                 },
-                .array => comptime blk: {
-                    const child = Type.from(T.child).?;
-                    break :blk Type{
-                        .Array = Array{
-                            .len = T.len,
-                            .child = &child,
+                .this => Type{
+                    .Ref = Ref{
+                        .Internal = Ref.Internal{
+                            .name = T.name,
                         },
-                    };
+                    },
                 },
                 .list => comptime blk: {
                     const child = Type.from(T.child).?;
@@ -175,6 +176,7 @@ pub const Type = union(enum) {
                     };
                 },
                 .string => .String,
+                .any => .Any,
                 .ignore => null,
                 else => @compileError("unexpected def_kind"),
             } else if (info.is_tuple) comptime blk: {
@@ -327,6 +329,8 @@ pub const Type = union(enum) {
                     std.mem.eql(u8, left.Ref.External.scheme, right.Ref.External.scheme) and
                     std.mem.eql(u8, left.Ref.External.name, right.Ref.External.name),
             },
+
+            .Any => right == .Any,
         };
     }
 };
@@ -409,7 +413,7 @@ test "array type" {
                 },
             },
         },
-        Type.from(define.Array(32, bool)),
+        Type.from([32]bool),
     );
 }
 
@@ -444,6 +448,15 @@ test "string type" {
             .String = undefined,
         },
         Type.from(define.String),
+    );
+}
+
+test "any type" {
+    try expectTypeEql(
+        .{
+            .Any = undefined,
+        },
+        Type.from(define.Any),
     );
 }
 
