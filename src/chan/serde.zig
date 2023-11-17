@@ -3,19 +3,24 @@ const std = @import("std");
 pub fn View(comptime Type: type) type {
     return switch (@typeInfo(Type)) {
         .Void, .Bool, .Int, .Float, .Enum => Type,
-        .Pointer => |info| switch (info.size) {
-            .One => View(info.child),
-            .Slice => if (info.child == u8)
-                []const u8
-            else
-                SliceView(Type),
-            else => @compileError("unsupported pointer type"),
-        },
+        .Pointer => PointerView(Type),
         .Array => ArrayView(Type),
         .Struct => StructView(Type),
         .Optional => |info| ?View(info.child),
         .Union => UnionView(Type),
         else => @compileError("unsupported type"),
+    };
+}
+
+fn PointerView(comptime Type: type) type {
+    const info = @typeInfo(Type).Pointer;
+    return switch (info.size) {
+        .One => View(info.child),
+        .Slice => if (info.child == u8)
+            []const u8
+        else
+            SliceView(Type),
+        else => @compileError("unsupported pointer type"),
     };
 }
 
@@ -76,40 +81,14 @@ fn StructView(comptime Type: type) type {
         }
 
         pub fn field(self: Self, comptime name: FieldName) View(FieldType(name)) {
-            const info = @typeInfo(Type).Struct;
-            const fixed_offset: ?usize = comptime blk: {
-                var offset: usize = 0;
-                for (info.fields, 0..) |f, i| {
-                    if (i == fieldIndex(name)) {
-                        break;
-                    }
-                    if (!typeHasFixedSize(f.type)) {
-                        break :blk null;
-                    }
-                    offset += sizeOf(f.type);
-                }
-                break :blk offset;
-            };
-
+            // Skip past all the preceding fields
             var offset: usize = 0;
-            if (fixed_offset) |fo| {
-                offset = fo;
-            } else {
-                const preceding_fields = info.fields[0..fieldIndex(name)];
-                inline for (preceding_fields) |f| {
-                    if (comptime typeHasFixedSize(f.type)) {
-                        offset += sizeOf(f.type);
-                    } else {
-                        const field_size = readPacked(usize, self.bytes[offset..]);
-                        offset += @sizeOf(usize);
-                        offset += field_size;
-                    }
-                }
-            }
-
-            if (!comptime typeHasFixedSize(FieldType(name))) {
+            inline for (0..fieldIndex(name)) |_| {
+                const field_size = readPacked(usize, self.bytes[offset..]);
                 offset += @sizeOf(usize);
+                offset += field_size;
             }
+            offset += @sizeOf(usize);
 
             return read(FieldType(name), self.bytes[offset..]);
         }
@@ -156,41 +135,40 @@ fn UnionView(comptime Type: type) type {
 pub fn read(comptime Type: type, bytes: []const u8) View(Type) {
     return switch (@typeInfo(Type)) {
         .Void => {},
-        .Bool => bytes[0] == 1,
-        .Int, .Float => readPacked(Type, bytes),
-        .Pointer => |info| switch (info.size) {
-            .One => read(info.child, bytes),
-            .Slice => if (info.child == u8)
-                readByteSlice(bytes)
-            else
-                SliceView(Type){
-                    .bytes = bytes,
-                },
-            else => @compileError("unsupported pointer type"),
-        },
-        .Array => ArrayView(Type){
-            .bytes = bytes,
-        },
-        .Struct => StructView(Type){
-            .bytes = bytes,
-        },
-        .Optional => |info| if (bytes[0] == 1)
-            read(info.child, bytes[1..])
-        else
-            null,
+        .Bool, .Int, .Float => readPacked(Type, bytes),
+        .Optional => readOptional(Type, bytes),
+        .Pointer => readPointer(Type, bytes),
+        .Array => ArrayView(Type){ .bytes = bytes },
+        .Struct => StructView(Type){ .bytes = bytes },
         .Enum => readEnum(Type, bytes),
-        .Union => UnionView(Type){
-            .bytes = bytes,
-        },
+        .Union => UnionView(Type){ .bytes = bytes },
         else => @compileError("unsupported"),
     };
 }
 
+fn readOptional(comptime Type: type, bytes: []const u8) View(Type) {
+    const info = @typeInfo(Type).Optional;
+    return if (bytes[0] == 1) read(info.child, bytes[1..]) else null;
+}
+
+fn readPointer(comptime Type: type, bytes: []const u8) View(Type) {
+    const info = @typeInfo(Type).Pointer;
+    return switch (info.size) {
+        .One => read(info.child, bytes),
+        .Slice => if (info.child == u8)
+            readByteSlice(bytes)
+        else
+            SliceView(Type){
+                .bytes = bytes,
+            },
+        else => @compileError("unsupported pointer type"),
+    };
+}
+
 fn readByteSlice(bytes: []const u8) []const u8 {
-    var slice: []const u8 = undefined;
-    slice.len = readPacked(usize, bytes);
-    slice.ptr = @ptrCast(&bytes[@sizeOf(usize)]);
-    return slice;
+    const offset = @sizeOf(usize);
+    const len = readPacked(usize, bytes);
+    return bytes[offset..][0..len];
 }
 
 fn readElem(comptime Element: type, len: usize, index: usize, bytes: []const u8) View(Element) {
@@ -198,22 +176,24 @@ fn readElem(comptime Element: type, len: usize, index: usize, bytes: []const u8)
         @panic("index out of bounds");
     }
 
-    var offset: usize = undefined;
-    if (comptime typeHasFixedSize(Element)) {
-        offset = (sizeOf(Element) * index);
-    } else {
-        var total_skip: usize = 0;
-        for (0..index) |i| {
-            const size_offset = i * @sizeOf(usize);
-            total_skip += readPacked(usize, bytes[size_offset..]);
-        }
-        offset = (@sizeOf(usize) * len) + total_skip;
+    // add up the sizes of all the preceding elements
+    var total_skip: usize = 0;
+    for (0..index) |i| {
+        const size_offset = i * @sizeOf(usize);
+        total_skip += readPacked(usize, bytes[size_offset..]);
     }
+
+    // The size of the element sizes slice
+    const sizes_size = @sizeOf(usize) * len;
+
+    // the offset is the size of the element sizes slice and the size of all the preceding elements
+    const offset = sizes_size + total_skip;
 
     return read(Element, bytes[offset..]);
 }
 
 fn readEnum(comptime Type: type, bytes: []const u8) Type {
+    // The integer value is read and then converted to the enum type
     const Int = @typeInfo(Type).Enum.tag_type;
     const t = readPacked(Int, bytes);
     return @enumFromInt(t);
@@ -226,190 +206,161 @@ fn readPacked(comptime Type: type, bytes: []const u8) Type {
 }
 
 pub fn write(value: anytype, out: *std.ArrayList(u8)) !void {
-    _ = try writeValue(value, out);
+    _ = try writeValue(@TypeOf(value), std.mem.Allocator.Error, value, out);
 }
 
-fn writeValue(value: anytype, out: *std.ArrayList(u8)) std.mem.Allocator.Error!usize {
-    const Type = @TypeOf(value);
-    const size = switch (@typeInfo(Type)) {
+// Writes a value of type `Type` by calling methods on `adapter` to get the value(s) expected of `Type`.
+pub fn writeAdapted(comptime Type: type, comptime Error: type, adapter: anytype, out: *std.ArrayList(u8)) !void {
+    _ = try writeValue(Type, Error || std.mem.Allocator.Error, adapter, out);
+}
+
+fn writeValue(comptime Type: type, comptime Error: type, value: anytype, out: *std.ArrayList(u8)) Error!usize {
+    return switch (@typeInfo(Type)) {
         .Void => 0,
-        .Bool, .Int, .Float => try writePacked(value, null, out),
-        .Pointer => |info| switch (info.size) {
-            .One => try writeValue(value.*, out),
-            .Slice => try writePacked(value.len, null, out) + try writeSlice(info.child, value, value.len, out),
-            else => @compileError("unsupported pointer type"),
-        },
-        .Array => |info| try writeSlice(info.child, value, info.len, out),
-        .Struct => try writeStruct(value, out),
-        .Optional => if (value) |v|
-            try writePacked(@as(u8, 1), null, out) + try writeValue(v, out)
-        else
-            try writePacked(@as(u8, 0), null, out),
-        .Enum => try writeEnum(value, out),
-        .Union => try writeUnion(value, out),
+        .Bool, .Int, .Float => try writePrimitive(Type, Error, value, out),
+        .Optional => try writeOptional(Type, Error, value, out),
+        .Pointer => try writePointer(Type, Error, value, out),
+        .Array => |info| try writeElements(Type, info.child, Error, info.len, value, out),
+        .Struct => try writeStruct(Type, Error, value, out),
+        .Enum => try writeEnum(Type, Error, value, out),
+        .Union => try writeUnion(Type, Error, value, out),
         else => @compileError("unsupported type"),
     };
-    return size;
 }
 
-fn writeSlice(comptime Elem: type, value: anytype, len: usize, out: *std.ArrayList(u8)) !usize {
-    var size: usize = 0;
-    if (comptime typeHasFixedSize(Elem)) {
-        for (value) |elem| {
-            size += try writeValue(elem, out);
-        }
-    } else {
-        var sizes_start = out.items.len;
+fn writePrimitive(comptime Type: type, comptime Error: type, value: anytype, out: *std.ArrayList(u8)) Error!usize {
+    const is_adapter = @TypeOf(value) != Type;
+    // Primitives have all of their bytes written as-is
+    return try writePacked(if (is_adapter) try value.value() else value, null, out);
+}
 
-        const sizes_size = len * @sizeOf(usize);
-        try out.appendNTimes(0, sizes_size);
-        size += sizes_size;
+fn writeOptional(comptime Type: type, comptime Error: type, value: anytype, out: *std.ArrayList(u8)) Error!usize {
+    const is_adapter = @TypeOf(value) != Type;
+    const info = @typeInfo(Type).Optional;
 
-        for (value, 0..) |elem, i| {
-            const elem_size = try writeValue(elem, out);
-            size += elem_size;
+    // The first byte that is written signifies whether there is a value or not
+    // 1 == Some
+    // 0 == None
+    const opt_val = if (is_adapter) try value.value() else value;
+    return if (opt_val) |v|
+        try writePacked(@as(u8, 1), null, out) + try writeValue(info.child, Error, v, out)
+    else
+        try writePacked(@as(u8, 0), null, out);
+}
 
-            const size_offset = sizes_start + (i * @sizeOf(usize));
-            _ = try writePacked(elem_size, size_offset, out);
-        }
+fn writePointer(comptime Type: type, comptime Error: type, value: anytype, out: *std.ArrayList(u8)) Error!usize {
+    const is_adapter = @TypeOf(value) != Type;
+    const info = @typeInfo(Type).Pointer;
+    return switch (info.size) {
+        // Single value pointers are simply dereferenced and their value written
+        .One => try writeValue(info.child, Error, if (is_adapter) value else value.*, out),
+
+        .Slice => blk: {
+            if (info.child == u8) {
+                // Byte slices are written as-is
+                const bytes = if (is_adapter) try value.value() else value;
+                const size = try writePacked(bytes.len, null, out);
+                try out.appendSlice(bytes);
+                break :blk size + bytes.len;
+            } else {
+                // All other slices are written element by element
+                const len = if (is_adapter) try value.len() else value.len;
+                break :blk try writePacked(len, null, out) +
+                    try writeElements(Type, info.child, Error, len, value, out);
+            }
+        },
+        else => @compileError("unsupported pointer type"),
+    };
+}
+
+fn writeElements(
+    comptime Type: type,
+    comptime Element: type,
+    comptime Error: type,
+    len: usize,
+    value: anytype,
+    out: *std.ArrayList(u8),
+) Error!usize {
+    const is_adapter = @TypeOf(value) != Type;
+
+    // Allocate the memory for the element sizes
+    const sizes_start = out.items.len;
+    const sizes_size = len * @sizeOf(usize);
+    try out.appendNTimes(0, sizes_size);
+
+    var elems_size: usize = 0;
+    for (0..len) |i| {
+        const elem = if (is_adapter) try value.elem(i) else value[i];
+
+        // Append the element, and record its size
+        const size = try writeValue(Element, Error, elem, out);
+        elems_size += size;
+
+        // Write the element's size into the previously allocated element size memory
+        const size_offset = sizes_start + (i * @sizeOf(usize));
+        _ = try writePacked(size, size_offset, out);
     }
-    return size;
+
+    // The total size is the size of the element size list, and the size of the elements themselves
+    return sizes_size + elems_size;
 }
 
-fn writeStruct(value: anytype, out: *std.ArrayList(u8)) !usize {
-    const Type = @TypeOf(value);
+fn writeStruct(
+    comptime Type: type,
+    comptime Error: type,
+    value: anytype,
+    out: *std.ArrayList(u8),
+) Error!usize {
+    const is_adapter = @TypeOf(value) != Type;
     const info = @typeInfo(Type).Struct;
 
     var size: usize = 0;
-    inline for (info.fields) |field| {
-        if (comptime typeHasFixedSize(field.type)) {
-            size += try writeValue(@field(value, field.name), out);
-        } else {
-            const size_offset = out.items.len;
-            size += try writePacked(@as(usize, 0), null, out);
-
-            const field_size = try writeValue(@field(value, field.name), out);
-            _ = try writePacked(field_size, size_offset, out);
-            size += field_size;
-        }
-    }
-    return size;
-}
-
-fn writeUnion(value: anytype, out: *std.ArrayList(u8)) !usize {
-    switch (value) {
-        inline else => |val, tag| {
-            var size = try writeEnum(tag, out);
-            size += try writeValue(val, out);
-            return size;
-        },
-    }
-}
-
-fn writeEnum(value: anytype, out: *std.ArrayList(u8)) !usize {
-    return try writePacked(@intFromEnum(value), null, out);
-}
-
-pub fn writeAdapted(comptime Type: type, comptime Error: type, adapter: anytype, out: *std.ArrayList(u8)) !void {
-    _ = try writeValueAdapted(Type, Error || std.mem.Allocator.Error, adapter, out);
-}
-
-fn writeValueAdapted(comptime Type: type, comptime Error: type, adapter: anytype, out: *std.ArrayList(u8)) Error!usize {
-    return switch (@typeInfo(Type)) {
-        .Void => 0,
-        .Bool, .Int, .Float => try writePacked(try adapter.value(), null, out),
-        .Pointer => |info| switch (info.size) {
-            .One => try writeValueAdapted(info.child, Error, adapter, out),
-            .Slice => blk: {
-                if (info.child == u8) {
-                    const bytes = try adapter.value();
-                    const size = try writePacked(bytes.len, null, out);
-                    try out.appendSlice(bytes);
-                    break :blk size + bytes.len;
-                }
-                break :blk try writePacked(try adapter.len(), null, out) +
-                    try writeSliceAdapted(info.child, Error, adapter, try adapter.len(), out);
-            },
-            else => @compileError("unsupported pointer type"),
-        },
-        .Array => |info| try writeSliceAdapted(info.child, Error, adapter, info.len, out),
-        .Struct => try writeStructAdapted(Type, Error, adapter, out),
-        .Optional => |info| if (try adapter.value()) |v|
-            try writePacked(@as(u8, 1), null, out) + try writeValueAdapted(info.child, Error, v, out)
-        else
-            try writePacked(@as(u8, 0), null, out),
-        .Enum => try writeEnum(try adapter.value(), out),
-        .Union => try writeUnionAdapted(Type, Error, adapter, out),
-        else => @compileError("unsupported type"),
-    };
-}
-
-fn writeSliceAdapted(
-    comptime Elem: type,
-    comptime Error: type,
-    adapter: anytype,
-    len: usize,
-    out: *std.ArrayList(u8),
-) Error!usize {
-    var size: usize = 0;
-    if (comptime typeHasFixedSize(Elem)) {
-        for (0..len) |i| {
-            size += try writeValueAdapted(Elem, Error, try adapter.elem(i), out);
-        }
-    } else {
-        var sizes_start = out.items.len;
-
-        const sizes_size = len * @sizeOf(usize);
-        try out.appendNTimes(0, sizes_size);
-        size += sizes_size;
-
-        for (0..len) |i| {
-            const elem_size = try writeValueAdapted(Elem, Error, try adapter.elem(i), out);
-            size += elem_size;
-
-            const size_offset = sizes_start + (i * @sizeOf(usize));
-            _ = try writePacked(elem_size, size_offset, out);
-        }
-    }
-    return size;
-}
-
-fn writeStructAdapted(
-    comptime Struct: type,
-    comptime Error: type,
-    adapter: anytype,
-    out: *std.ArrayList(u8),
-) Error!usize {
-    const info = @typeInfo(Struct).Struct;
-
-    var size: usize = 0;
     inline for (info.fields, 0..) |field, i| {
-        if (comptime typeHasFixedSize(field.type)) {
-            size += try writeValueAdapted(field.type, Error, try adapter.field(i), out);
-        } else {
-            const size_offset = out.items.len;
-            size += try writePacked(@as(usize, 0), null, out);
+        // Allocate the memory for the field's size
+        const field_size_offset = out.items.len;
+        size += try writePacked(@as(usize, 0), null, out);
 
-            const field_size = try writeValueAdapted(field.type, Error, try adapter.field(i), out);
-            _ = try writePacked(field_size, size_offset, out);
-            size += field_size;
-        }
+        // Write the field value
+        const field_value = if (is_adapter) try value.field(i) else @field(value, field.name);
+        const field_size = try writeValue(field.type, Error, field_value, out);
+
+        // Write the field value's size into the previously allocated memory
+        _ = try writePacked(field_size, field_size_offset, out);
+        size += field_size;
     }
+
     return size;
 }
 
-fn writeUnionAdapted(
-    comptime Union: type,
+fn writeEnum(comptime Type: type, comptime Error: type, value: anytype, out: *std.ArrayList(u8)) Error!usize {
+    const is_adapter = @TypeOf(value) != Type;
+    const enum_value = if (is_adapter) try value.value() else value;
+
+    // The enum value is written as its integer value
+    return try writePacked(@intFromEnum(enum_value), null, out);
+}
+
+fn writeUnion(
+    comptime Type: type,
     comptime Error: type,
-    adapter: anytype,
+    value: anytype,
     out: *std.ArrayList(u8),
 ) Error!usize {
-    const info = @typeInfo(Union).Union;
-    switch (try adapter.tag()) {
-        inline else => |tag| {
-            const field_type = info.fields[@intFromEnum(tag)].type;
-            var size = try writeEnum(tag, out);
-            size = try writeValueAdapted(field_type, Error, try adapter.value(tag), out);
+    const is_adapter = @TypeOf(value) != Type;
+    const Tag = std.meta.Tag(Type);
+    const info = @typeInfo(Type).Union;
+
+    const tag: Tag = if (is_adapter) try value.tag() else value;
+    switch (tag) {
+        inline else => |t| {
+            // Write the active tag
+            var size = try writeEnum(Tag, Error, t, out);
+
+            // Write the active value
+            const field = info.fields[@intFromEnum(t)];
+            const field_value = if (is_adapter) try value.value(t) else @field(value, field.name);
+            size += try writeValue(field.type, Error, field_value, out);
+
             return size;
         },
     }
@@ -426,35 +377,6 @@ fn writePacked(value: anytype, at: ?usize, out: *std.ArrayList(u8)) !usize {
         try out.appendSlice(bytes);
     }
     return bytes.len;
-}
-
-fn typeHasFixedSize(comptime Type: type) bool {
-    return switch (@typeInfo(Type)) {
-        .Void, .Bool, .Int, .Float, .Enum => true,
-        .Optional, .Pointer, .Union => false,
-        .Array => |info| comptime typeHasFixedSize(info.child),
-        .Struct => |info| for (info.fields) |field| {
-            if (!comptime typeHasFixedSize(field.type))
-                break false;
-        } else true,
-        else => @compileError("unsupported"),
-    };
-}
-
-// this function assumes that `typeHasFixedSize(Type) == true`.
-fn sizeOf(comptime Type: type) comptime_int {
-    return switch (@typeInfo(Type)) {
-        .Void, .Bool, .Int, .Float, .Enum => @sizeOf(Type),
-        .Array => |info| info.len * sizeOf(info.child),
-        .Struct => |info| blk: {
-            var size = 0;
-            for (info.fields) |field| {
-                size += sizeOf(field.type);
-            }
-            break :blk size;
-        },
-        else => @compileError("unsupported"),
-    };
 }
 
 test "bool serde" {
