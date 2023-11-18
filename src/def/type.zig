@@ -60,7 +60,11 @@ pub const Type = union(enum) {
     };
 
     pub const Tuple = struct {
-        fields: []const Type,
+        fields: []const Field,
+
+        pub const Field = struct {
+            type: Type,
+        };
     };
 
     pub const Union = struct {
@@ -180,17 +184,19 @@ pub const Type = union(enum) {
                 .ignore => null,
                 else => @compileError("unexpected def_kind"),
             } else if (info.is_tuple) comptime blk: {
-                var field_types: [info.fields.len]Type = undefined;
+                var fields: [info.fields.len]Tuple.Field = undefined;
                 var len = 0;
                 for (info.fields) |field| {
                     if (Type.from(field.type)) |field_type| {
-                        field_types[len] = field_type;
+                        fields[len] = Tuple.Field{
+                            .type = field_type,
+                        };
                         len += 1;
                     }
                 }
                 break :blk Type{
                     .Tuple = Tuple{
-                        .fields = field_types[0..len],
+                        .fields = fields[0..len],
                     },
                 };
             } else comptime blk: {
@@ -298,8 +304,8 @@ pub const Type = union(enum) {
 
             .Tuple => if (right != .Tuple or left.Tuple.fields.len != right.Tuple.fields.len)
                 false
-            else for (left.Tuple.fields, right.Tuple.fields) |left_type, right_type| {
-                if (!Type.eql(left_type, right_type)) {
+            else for (left.Tuple.fields, right.Tuple.fields) |left_field, right_field| {
+                if (!Type.eql(left_field.type, right_field.type)) {
                     break false;
                 }
             } else true,
@@ -486,8 +492,12 @@ test "struct type" {
 
 test "tuple type" {
     const expected = .{
-        Type.Bool,
-        Type.String,
+        Type.Tuple.Field{
+            .type = Type.Bool,
+        },
+        Type.Tuple.Field{
+            .type = Type.String,
+        },
     };
     try expectTypeEql(
         .{
