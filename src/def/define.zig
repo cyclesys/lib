@@ -244,6 +244,11 @@ fn checkField(
             if (info.tag_type == null) {
                 @compileError("field union types must be tagged");
             }
+
+            if (info.fields.len > std.math.maxInt(u16)) {
+                @compileError("len of union fields must fit within a u16");
+            }
+
             for (info.fields) |field| {
                 checkField(field.type, scheme_types, true);
             }
