@@ -127,7 +127,12 @@ fn UnionView(comptime Type: type) type {
         }
 
         pub fn value(self: Self, comptime t: Tag) View(Value(t)) {
-            return read(Value(t), self.bytes[tag_size..]);
+            var offset: usize = tag_size;
+
+            const field_size = read(usize, self.bytes[offset..]);
+            offset += @sizeOf(usize);
+
+            return read(Value(t), self.bytes[offset..][0..field_size]);
         }
     };
 }
@@ -346,10 +351,18 @@ fn writeUnion(
             // Write the active tag
             var size = try writeEnum(Tag, Error, t, out);
 
+            // Allocate the memory for the field's size
+            const field_size_offset = out.items.len;
+            size += try writePacked(@as(usize, 0), null, out);
+
             // Write the active value
             const field = info.fields[@intFromEnum(t)];
             const field_value = if (is_adapter) try value.value(t) else @field(value, field.name);
-            size += try writeValue(field.type, Error, field_value, out);
+            const field_size = try writeValue(field.type, Error, field_value, out);
+            size += field_size;
+
+            // Write the field value's size into the previously allocated memory
+            _ = try writePacked(field_size, field_size_offset, out);
 
             return size;
         },
