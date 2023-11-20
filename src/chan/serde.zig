@@ -166,8 +166,8 @@ fn readPointer(comptime Type: type, bytes: []const u8) View(Type) {
 }
 
 fn readByteSlice(bytes: []const u8) []const u8 {
-    const offset = @sizeOf(usize);
     const len = readPacked(usize, bytes);
+    const offset = @sizeOf(usize);
     return bytes[offset..][0..len];
 }
 
@@ -177,19 +177,15 @@ fn readElem(comptime Element: type, len: usize, index: usize, bytes: []const u8)
     }
 
     // add up the sizes of all the preceding elements
-    var total_skip: usize = 0;
-    for (0..index) |i| {
-        const size_offset = i * @sizeOf(usize);
-        total_skip += readPacked(usize, bytes[size_offset..]);
+    var offset: usize = 0;
+    for (0..index) |_| {
+        const elem_size = readPacked(usize, bytes[offset..]);
+        offset += @sizeOf(usize);
+        offset += elem_size;
     }
 
-    // The size of the element sizes slice
-    const sizes_size = @sizeOf(usize) * len;
-
-    // the offset is the size of the element sizes slice and the size of all the preceding elements
-    const offset = sizes_size + total_skip;
-
-    return read(Element, bytes[offset..]);
+    const elem_bytes = read([]const u8, bytes[offset..]);
+    return read(Element, elem_bytes);
 }
 
 fn readEnum(comptime Type: type, bytes: []const u8) Type {
@@ -282,27 +278,22 @@ fn writeElements(
     out: *std.ArrayList(u8),
 ) Error!usize {
     const is_adapter = @TypeOf(value) != Type;
-
-    // Allocate the memory for the element sizes
-    const sizes_start = out.items.len;
-    const sizes_size = len * @sizeOf(usize);
-    try out.appendNTimes(0, sizes_size);
-
-    var elems_size: usize = 0;
+    var size: usize = 0;
     for (0..len) |i| {
-        const elem = if (is_adapter) try value.elem(i) else value[i];
+        // Allocate the memory for the element's size
+        const elem_size_offset = out.items.len;
+        size += try writePacked(@as(usize, 0), null, out);
 
-        // Append the element, and record its size
-        const size = try writeValue(Element, Error, elem, out);
-        elems_size += size;
+        // Append the element
+        const elem = if (is_adapter) try value.elem(i) else value[i];
+        const elem_size = try writeValue(Element, Error, elem, out);
 
         // Write the element's size into the previously allocated element size memory
-        const size_offset = sizes_start + (i * @sizeOf(usize));
-        _ = try writePacked(size, size_offset, out);
-    }
+        _ = try writePacked(elem_size, elem_size_offset, out);
 
-    // The total size is the size of the element size list, and the size of the elements themselves
-    return sizes_size + elems_size;
+        size += elem_size;
+    }
+    return size;
 }
 
 fn writeStruct(
@@ -313,7 +304,6 @@ fn writeStruct(
 ) Error!usize {
     const is_adapter = @TypeOf(value) != Type;
     const info = @typeInfo(Type).Struct;
-
     var size: usize = 0;
     inline for (info.fields, 0..) |field, i| {
         // Allocate the memory for the field's size
@@ -326,9 +316,9 @@ fn writeStruct(
 
         // Write the field value's size into the previously allocated memory
         _ = try writePacked(field_size, field_size_offset, out);
+
         size += field_size;
     }
-
     return size;
 }
 
