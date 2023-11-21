@@ -103,11 +103,6 @@ fn UnionView(comptime Type: type) type {
             const info = @typeInfo(Type).Union;
             break :blk info.tag_type orelse @compileError("only tagged unions are supported");
         };
-        const TagInt = blk: {
-            const info = @typeInfo(Tag).Enum;
-            break :blk info.tag_type;
-        };
-        const tag_size = @sizeOf(TagInt);
         const Self = @This();
 
         pub fn Value(comptime t: Tag) type {
@@ -123,11 +118,11 @@ fn UnionView(comptime Type: type) type {
         }
 
         pub fn tag(self: Self) Tag {
-            return readEnum(Tag, self.bytes);
+            return @enumFromInt(readPacked(u16, self.bytes));
         }
 
         pub fn value(self: Self, comptime t: Tag) View(Value(t)) {
-            var offset: usize = tag_size;
+            var offset: usize = @sizeOf(u16);
 
             const field_size = read(usize, self.bytes[offset..]);
             offset += @sizeOf(usize);
@@ -348,8 +343,8 @@ fn writeUnion(
     const tag: Tag = if (is_adapter) try value.tag() else value;
     switch (tag) {
         inline else => |t| {
-            // Write the active tag
-            var size = try writeEnum(Tag, Error, t, out);
+            // Write the active tag as a u16
+            var size = try writePacked(@as(u16, @intFromEnum(t)), null, out);
 
             // Allocate the memory for the field's size
             const field_size_offset = out.items.len;
