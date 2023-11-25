@@ -1,6 +1,7 @@
 const std = @import("std");
 const chan = @import("../lib.zig").chan;
 const def = @import("../lib.zig").def;
+const obj = @import("../lib.zig").obj;
 const meta = @import("../meta.zig");
 const serde = @import("serde.zig");
 
@@ -65,7 +66,7 @@ pub fn Store(comptime Index: type) type {
             self.* = undefined;
         }
 
-        pub fn add(self: *Self, id: def.ObjectId, bytes: []const u8) !void {
+        pub fn add(self: *Self, id: obj.ObjectId, bytes: []const u8) !void {
             try self.withVersionSlot(id, bytes, addVersion);
         }
 
@@ -73,7 +74,7 @@ pub fn Store(comptime Index: type) type {
             self: *Self,
             comptime Version: type,
             slot: anytype,
-            id: def.ObjectId,
+            id: obj.ObjectId,
             bytes: []const u8,
         ) Error!void {
             const gop = try slot.getOrPut(@bitCast(id.source));
@@ -85,7 +86,7 @@ pub fn Store(comptime Index: type) type {
             gop.value_ptr.* = try initValue(self.allocator, Version, .val, chan.read(serde.NewType(Version), bytes));
         }
 
-        pub fn update(self: *Self, id: def.ObjectId, bytes: []const u8) Error!void {
+        pub fn update(self: *Self, id: obj.ObjectId, bytes: []const u8) Error!void {
             try self.withVersionSlot(id, bytes, updateVersion);
         }
 
@@ -93,7 +94,7 @@ pub fn Store(comptime Index: type) type {
             self: *Self,
             comptime Version: type,
             slot: anytype,
-            id: def.ObjectId,
+            id: obj.ObjectId,
             bytes: []const u8,
         ) Error!void {
             if (slot.getPtr(@bitCast(id.source))) |ptr| {
@@ -104,7 +105,7 @@ pub fn Store(comptime Index: type) type {
         }
 
         pub fn remove(self: *Self, id_bits: u128) Error!void {
-            const id: def.ObjectId = @bitCast(id_bits);
+            const id: obj.ObjectId = @bitCast(id_bits);
             try self.withVersionSlot(id, @as(void, undefined), removeVersion);
         }
 
@@ -112,7 +113,7 @@ pub fn Store(comptime Index: type) type {
             self: *Self,
             comptime Version: type,
             slot: anytype,
-            id: def.ObjectId,
+            id: obj.ObjectId,
             _: void,
         ) Error!void {
             if (slot.getPtr(@bitCast(id.source))) |ptr| {
@@ -125,9 +126,9 @@ pub fn Store(comptime Index: type) type {
 
         fn withVersionSlot(
             self: *Self,
-            id: def.ObjectId,
+            id: obj.ObjectId,
             args: anytype,
-            f: fn (*Self, comptime type, anytype, id: def.ObjectId, @TypeOf(args)) Error!void,
+            f: fn (*Self, comptime type, anytype, id: obj.ObjectId, @TypeOf(args)) Error!void,
         ) Error!void {
             if (id.type.scheme >= Index.schemes.len) {
                 return error.SchemeNotDefined;
@@ -185,7 +186,7 @@ pub fn Value(comptime Type: type) type {
         .Struct => meta.RemapStruct(meta.fields(Type), Value),
         .Tuple => meta.RemapTuple(meta.fields(Type), Value),
         .Union => meta.RemapUnion(meta.fields(Type), Value),
-        .Ref => def.ObjectId,
+        .Ref => obj.ObjectId,
     };
 }
 

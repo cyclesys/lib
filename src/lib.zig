@@ -10,16 +10,18 @@ pub const chan = struct {
 pub const def = struct {
     pub const ObjectScheme = @import("def/ObjectScheme.zig");
     pub usingnamespace @import("def/define.zig");
-    pub usingnamespace @import("def/ids.zig");
     pub usingnamespace @import("def/type.zig");
 };
 
 pub const obj = struct {
+    pub usingnamespace @import("obj/ids.zig");
     pub usingnamespace @import("obj/index.zig");
     pub usingnamespace @import("obj/serde.zig");
     pub usingnamespace @import("obj/store.zig");
     pub usingnamespace @import("obj/write.zig");
 };
+
+pub const scm = @import("scm.zig");
 
 pub const ui = struct {
     pub const render = struct {
@@ -29,25 +31,33 @@ pub const ui = struct {
 
 pub const SystemMessage = union(enum) {
     AddObject: struct {
-        id: u128,
+        id: obj.ObjectIdInt,
         bytes: []const u8,
     },
     UpdateObject: struct {
-        id: u128,
+        id: obj.ObjectIdInt,
         bytes: []const u8,
     },
-    RemoveObject: struct {
-        id: u128,
-    },
+    RemoveObject: obj.ObjectIdInt,
+    CreateObject: obj.ObjectIdInt,
 };
 
 pub const PluginMessage = union(enum) {
-    SetVersion: struct {
-        major: u16,
-        minor: u16,
+    Initialize: struct {
+        version: struct {
+            major: u16,
+            minor: u16,
+        },
+        index: []const def.ObjectScheme,
     },
-    SetIndex: []const def.ObjectScheme,
-    Finalize: void,
+    NewObject: struct {
+        id: obj.ObjectIdInt,
+        bytes: []const u8,
+    },
+    MutateObject: struct {
+        id: obj.ObjectIdInt,
+        bytes: []const u8,
+    },
 };
 
 pub fn init(allocator: std.mem.Allocator, cfg: struct {
