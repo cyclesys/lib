@@ -1,7 +1,6 @@
 const std = @import("std");
 const chan = @import("../lib.zig").chan;
 const def = @import("../lib.zig").def;
-const obj = @import("../lib.zig").obj;
 const meta = @import("../meta.zig");
 const serde = @import("serde.zig");
 
@@ -25,16 +24,16 @@ pub fn Store(comptime Index: type) type {
 
         const Slots = blk: {
             var scheme_types: [Index.schemes.len]type = undefined;
-            for (Index.scheme.types, 0..) |Scheme, i| {
+            for (Index.scheme.types, 0..) |Scheme, scheme_id| {
                 var object_types: [Scheme.types.len]type = undefined;
-                for (Scheme.types, 0..) |Object, ii| {
+                for (Scheme.types, 0..) |Object, object_id| {
                     var version_types: [Object.versions.len]type = undefined;
-                    for (Object.versions, 0..) |Version, iii| {
-                        version_types[iii] = Slot(Version);
+                    for (Object.versions, 0..) |Version, version_id| {
+                        version_types[version_id] = Slot(Version);
                     }
-                    object_types[ii] = meta.Tuple(version_types);
+                    object_types[object_id] = meta.Tuple(version_types);
                 }
-                scheme_types[i] = meta.Tuple(object_types);
+                scheme_types[scheme_id] = meta.Tuple(object_types);
             }
             break :blk meta.Tuple(scheme_types);
         };
@@ -45,10 +44,10 @@ pub fn Store(comptime Index: type) type {
 
         pub fn init(allocator: std.mem.Allocator) Self {
             var slots: Slots = undefined;
-            inline for (Index.scheme_types, 0..) |Scheme, i| {
-                inline for (Scheme.types, 0..) |Object, ii| {
-                    inline for (0..Object.versions.len) |iii| {
-                        slots[i][ii][iii] = Slot.init(allocator);
+            inline for (Index.scheme_types, 0..) |Scheme, scheme_id| {
+                inline for (Scheme.types, 0..) |Object, object_id| {
+                    inline for (0..Object.versions.len) |version_id| {
+                        slots[scheme_id][object_id][version_id] = Slot.init(allocator);
                     }
                 }
             }
@@ -56,17 +55,17 @@ pub fn Store(comptime Index: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            inline for (Index.scheme_types, 0..) |Scheme, i| {
-                inline for (Scheme.types, 0..) |Object, ii| {
-                    inline for (0..Object.versions.len) |iii| {
-                        self.slots[i][ii][iii].deinit();
+            inline for (Index.scheme_types, 0..) |Scheme, scheme_id| {
+                inline for (Scheme.types, 0..) |Object, object_id| {
+                    inline for (0..Object.versions.len) |version_id| {
+                        self.slots[scheme_id][object_id][version_id].deinit();
                     }
                 }
             }
             self.* = undefined;
         }
 
-        pub fn add(self: *Self, id: obj.ObjectId, bytes: []const u8) !void {
+        pub fn add(self: *Self, id: def.ObjectId, bytes: []const u8) !void {
             try self.withVersionSlot(id, bytes, addVersion);
         }
 
@@ -74,7 +73,7 @@ pub fn Store(comptime Index: type) type {
             self: *Self,
             comptime Version: type,
             slot: anytype,
-            id: obj.ObjectId,
+            id: def.ObjectId,
             bytes: []const u8,
         ) Error!void {
             const gop = try slot.getOrPut(@bitCast(id.source));
@@ -86,7 +85,7 @@ pub fn Store(comptime Index: type) type {
             gop.value_ptr.* = try initValue(self.allocator, Version, .val, chan.read(serde.NewType(Version), bytes));
         }
 
-        pub fn update(self: *Self, id: obj.ObjectId, bytes: []const u8) Error!void {
+        pub fn update(self: *Self, id: def.ObjectId, bytes: []const u8) Error!void {
             try self.withVersionSlot(id, bytes, updateVersion);
         }
 
@@ -94,7 +93,7 @@ pub fn Store(comptime Index: type) type {
             self: *Self,
             comptime Version: type,
             slot: anytype,
-            id: obj.ObjectId,
+            id: def.ObjectId,
             bytes: []const u8,
         ) Error!void {
             if (slot.getPtr(@bitCast(id.source))) |ptr| {
@@ -105,7 +104,7 @@ pub fn Store(comptime Index: type) type {
         }
 
         pub fn remove(self: *Self, id_bits: u128) Error!void {
-            const id: obj.ObjectId = @bitCast(id_bits);
+            const id: def.ObjectId = @bitCast(id_bits);
             try self.withVersionSlot(id, @as(void, undefined), removeVersion);
         }
 
@@ -113,7 +112,7 @@ pub fn Store(comptime Index: type) type {
             self: *Self,
             comptime Version: type,
             slot: anytype,
-            id: obj.ObjectId,
+            id: def.ObjectId,
             _: void,
         ) Error!void {
             if (slot.getPtr(@bitCast(id.source))) |ptr| {
@@ -126,44 +125,44 @@ pub fn Store(comptime Index: type) type {
 
         fn withVersionSlot(
             self: *Self,
-            id: obj.ObjectId,
+            id: def.ObjectId,
             args: anytype,
-            f: fn (*Self, comptime type, anytype, id: obj.ObjectId, @TypeOf(args)) Error!void,
+            f: fn (*Self, comptime type, anytype, id: def.ObjectId, @TypeOf(args)) Error!void,
         ) Error!void {
             if (id.type.scheme >= Index.schemes.len) {
                 return error.SchemeNotDefined;
             }
 
             const SchemeEnum = meta.NumEnum(Index.schemes.len);
-            const scheme_id: SchemeEnum = @enumFromInt(id.type.scheme);
-            switch (scheme_id) {
+            const scheme: SchemeEnum = @enumFromInt(id.type.scheme);
+            switch (scheme) {
                 inline else => |scheme_tag| {
-                    const scheme_slot = @intFromEnum(scheme_tag);
-                    const Scheme = Index.schemes[scheme_slot];
+                    const scheme_id = @intFromEnum(scheme_tag);
+                    const Scheme = Index.schemes[scheme_id];
 
-                    if (id.type.name >= Scheme.types.len) {
+                    if (id.type.path >= Scheme.types.len) {
                         return error.ObjectNotDefined;
                     }
 
                     const ObjectEnum = meta.NumEnum(Scheme.types.len);
-                    const object_id: ObjectEnum = @enumFromInt(id.type.name);
-                    switch (object_id) {
+                    const object: ObjectEnum = @enumFromInt(id.type.path);
+                    switch (object) {
                         inline else => |object_tag| {
-                            const object_slot = @intFromEnum(object_tag);
-                            const Object = Scheme.types[object_slot];
+                            const object_id = @intFromEnum(object_tag);
+                            const Object = Scheme.types[object_id];
 
-                            if (id.type.version >= Object.versions.len) {
+                            if (id.type.value >= Object.versions.len) {
                                 return error.VersionNotDefined;
                             }
 
                             const VersionEnum = meta.NumEnum(Object.versions.len);
-                            const version_id: VersionEnum = @enumFromInt(id.type.version);
-                            switch (version_id) {
+                            const version: VersionEnum = @enumFromInt(id.type.value);
+                            switch (version) {
                                 inline else => |version_tag| {
-                                    const version_slot = @intFromEnum(version_tag);
-                                    const Version = Scheme.types[version_slot];
+                                    const version_id = @intFromEnum(version_tag);
+                                    const Version = Scheme.types[version_id];
 
-                                    const slot: *Slot(Version) = &self.slots[scheme_slot][object_slot][version_slot];
+                                    const slot: *Slot(Version) = &self.slots[scheme_id][object_id][version_id];
                                     f(self, Version, slot, id, args);
                                 },
                             }
@@ -186,7 +185,7 @@ pub fn Value(comptime Type: type) type {
         .Struct => meta.RemapStruct(meta.fields(Type), Value),
         .Tuple => meta.RemapTuple(meta.fields(Type), Value),
         .Union => meta.RemapUnion(meta.fields(Type), Value),
-        .Ref => obj.ObjectId,
+        .Ref => def.ObjectId,
     };
 }
 

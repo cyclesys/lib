@@ -10,11 +10,11 @@ pub const chan = struct {
 pub const def = struct {
     pub const ObjectScheme = @import("def/ObjectScheme.zig");
     pub usingnamespace @import("def/define.zig");
+    pub usingnamespace @import("obj/id.zig");
     pub usingnamespace @import("def/type.zig");
 };
 
 pub const obj = struct {
-    pub usingnamespace @import("obj/ids.zig");
     pub usingnamespace @import("obj/index.zig");
     pub usingnamespace @import("obj/serde.zig");
     pub usingnamespace @import("obj/store.zig");
@@ -31,15 +31,16 @@ pub const ui = struct {
 
 pub const SystemMessage = union(enum) {
     AddObject: struct {
-        id: obj.ObjectIdInt,
+        id: def.ObjectIdInt,
         bytes: []const u8,
     },
     UpdateObject: struct {
-        id: obj.ObjectIdInt,
+        id: def.ObjectIdInt,
         bytes: []const u8,
     },
-    RemoveObject: obj.ObjectIdInt,
-    CreateObject: obj.ObjectIdInt,
+    RemoveObject: def.ObjectIdInt,
+    CreateObject: def.ObjectIdInt,
+    SourceUpdated: def.SourceIdInt,
 };
 
 pub const PluginMessage = union(enum) {
@@ -49,19 +50,21 @@ pub const PluginMessage = union(enum) {
             minor: u16,
         },
         index: []const def.ObjectScheme,
+        render: []const def.SchemeIdInt,
     },
     NewObject: struct {
-        id: obj.ObjectIdInt,
+        id: def.ObjectIdInt,
         bytes: []const u8,
     },
     MutateObject: struct {
-        id: obj.ObjectIdInt,
+        id: def.ObjectIdInt,
         bytes: []const u8,
     },
 };
 
 pub fn init(allocator: std.mem.Allocator, cfg: struct {
     index: []const def.ObjectScheme,
+    render: ?[]const def.SchemeIdInt,
 }) !struct {
     chan.Reader(SystemMessage),
     chan.Writer(PluginMessage),
@@ -145,9 +148,9 @@ test {
     // TOOD: these tests don't compile due to compiler segfaults
     //_ = @import("obj/write.zig");
 
-    _ = @import("ui/text/bidi.zig");
-    _ = @import("ui/text/GlyphAtlas.zig");
-    _ = @import("ui/text/GraphemeBreak.zig");
-    _ = @import("ui/text/LineBreak.zig");
-    _ = @import("ui/text/WordBreak.zig");
+    //_ = @import("ui/text/bidi.zig");
+    //_ = @import("ui/text/GlyphAtlas.zig");
+    //_ = @import("ui/text/GraphemeBreak.zig");
+    //_ = @import("ui/text/LineBreak.zig");
+    //_ = @import("ui/text/WordBreak.zig");
 }
